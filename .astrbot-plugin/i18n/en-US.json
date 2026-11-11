@@ -1,0 +1,12 @@
+{
+  "views": {
+    "decision-log": {
+      "title": "Decision Results"
+    }
+  },
+  "pages": {
+    "decision-log": {
+      "title": "Decision Results"
+    }
+  }
+}

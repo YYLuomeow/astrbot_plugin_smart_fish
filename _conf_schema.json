@@ -1,0 +1,323 @@
+{
+  "bot_aliases": {
+    "description": "主动唤醒词",
+    "type": "list",
+    "hint": "消息中出现这些词时直接视为在对机器人说话，不经过判断模型",
+    "default": [
+      "鱼来",
+      "鱼呢",
+      "小鲸鱼",
+      "大肥鱼"
+    ]
+  },
+  "judge": {
+    "description": "消息判断",
+    "type": "object",
+    "hint": "群聊中先用判断模型判断这条消息是否在对机器人说话，避免逐条回复；图片可先转成文字",
+    "items": {
+      "enabled": {
+        "description": "启用消息判断",
+        "type": "bool",
+        "default": true
+      },
+      "judge_context_count": {
+        "description": "判断携带的最近群聊条数",
+        "type": "int",
+        "hint": "LLM 与 JEV 判断共用的上下文条数；0 表示只判断当前消息",
+        "default": 10,
+        "slider": {
+          "min": 0,
+          "max": 50,
+          "step": 1
+        }
+      },
+      "mode": {
+        "description": "判断方式",
+        "type": "string",
+        "options": [
+          "llm",
+          "decision"
+        ],
+        "labels": [
+          "LLM 判断",
+          "JEV 判断"
+        ],
+        "hint": "LLM 判断用对话模型给出「在和我说话」的概率；JEV 判断调用决策模型平台，返回概率；LLM 判断更准确，JEV 判断更快速",
+        "default": "decision"
+      },
+      "llm_provider_id": {
+        "description": "用于判断的对话模型",
+        "type": "string",
+        "hint": "留空则使用当前会话的对话模型",
+        "default": "",
+        "_special": "select_provider",
+        "condition": {
+          "mode": "llm"
+        }
+      },
+      "platform": {
+        "description": "决策模型平台",
+        "type": "string",
+        "options": [
+          "tokenrhythm",
+          "typesafe"
+        ],
+        "labels": [
+          "基元律动 (TokenRhythm)",
+          "TypeSafe"
+        ],
+        "default": "tokenrhythm",
+        "condition": {
+          "mode": "decision"
+        }
+      },
+      "tokenrhythm_api_base": {
+        "description": "基元律动 API 地址",
+        "type": "string",
+        "hint": "留空使用 https://tokenrhythm.studio/v1",
+        "default": "",
+        "condition": {
+          "mode": "decision",
+          "platform": "tokenrhythm"
+        }
+      },
+      "tokenrhythm_api_key": {
+        "description": "基元律动 API Key",
+        "type": "string",
+        "secret": true,
+        "default": "",
+        "condition": {
+          "mode": "decision",
+          "platform": "tokenrhythm"
+        }
+      },
+      "tokenrhythm_model_id": {
+        "description": "基元律动模型 ID",
+        "type": "string",
+        "hint": "留空使用 NeoHorse-Jev-4B",
+        "default": "",
+        "condition": {
+          "mode": "decision",
+          "platform": "tokenrhythm"
+        }
+      },
+      "typesafe_api_base": {
+        "description": "TypeSafe API 地址",
+        "type": "string",
+        "hint": "留空使用 https://api.typesafe.ai/v1",
+        "default": "",
+        "condition": {
+          "mode": "decision",
+          "platform": "typesafe"
+        }
+      },
+      "typesafe_api_key": {
+        "description": "TypeSafe API Key",
+        "type": "string",
+        "secret": true,
+        "default": "",
+        "condition": {
+          "mode": "decision",
+          "platform": "typesafe"
+        }
+      },
+      "typesafe_model_id": {
+        "description": "TypeSafe 模型 ID",
+        "type": "string",
+        "hint": "留空使用 jev-latest",
+        "default": "",
+        "condition": {
+          "mode": "decision",
+          "platform": "typesafe"
+        }
+      },
+      "threshold": {
+        "description": "判定为「在和我说话」的概率阈值",
+        "type": "float",
+        "hint": "LLM 判断与 JEV 判断共用；判断出的概率达到该值才回复",
+        "default": 0.55,
+        "slider": {
+          "min": 0.05,
+          "max": 1,
+          "step": 0.05
+        }
+      },
+      "decision_question": {
+        "description": "决策模型的判断问题",
+        "type": "text",
+        "default": "你是 DeepSeek 社区二创拟人形象“鲸鱼娘”，通常以“鱼”自称，常被喊作“大肥鱼”。根据聊天消息，判断用户的当前消息是否在和你聊天或者对话",
+        "condition": {
+          "mode": "decision"
+        }
+      },
+      "prompt": {
+        "description": "LLM 判断提示词，支持 {context} 与 {message} 占位符",
+        "type": "text",
+        "hint": "要求模型只输出 0-1 之间的概率，例如「只回复一个数字」",
+        "default": "下面是一段 QQ 群聊记录：{context}\n现在用户发送了：{message}\n\n你是DeepSeek的小鲸鱼、昵称大肥鱼，请判断这条消息是否在对你说话，或者是否在讨论需要你回应的内容，只回复一个 0 到 1 之间的数字，表示这条消息在对你说话的概率",
+        "condition": {
+          "mode": "llm"
+        }
+      }
+    }
+  },
+  "image_to_text": {
+    "description": "图片回复",
+    "type": "object",
+    "hint": "开启后先用对话模型把图片转成文字，在通过唤醒词判断是否回复",
+    "items": {
+      "enabled": {
+        "description": "启用图转文",
+        "type": "bool",
+        "default": true
+      },
+      "provider_id": {
+        "description": "图转文模型",
+        "type": "string",
+        "hint": "留空则使用当前会话的对话模型；需要支持图片输入",
+        "default": "",
+        "_special": "select_provider"
+      },
+      "prompt": {
+        "description": "图转文提示词",
+        "type": "text",
+        "default": "请完成两个任务：\n任务1：用中文客观描述这张图片的内容（人物、场景、文字、元素等），不做评价\n任务2：判断该图片是否与“DeepSeek小鲸鱼”这一形象或话题有关联，或是否具备讨论度，满足任意条件即为相关\n输出格式严格如下：\n[图片描述]\n[判定：<RESULT>]\n（说明：<RESULT> 只能是 <RELATED> 或 <UNRELATED>，不要输出其他内容）"
+      },
+      "wake_words": {
+        "description": "图转文主动唤醒词",
+        "type": "list",
+        "hint": "转写出的文字包含其中任意一个词时直接回复；不包含则不回复",
+        "default": [
+          "RELATED",
+          "白饭",
+          "大肥鱼",
+          "鲸鱼娘",
+          "杀鲸霸拳",
+          "DeepSeek",
+          "蓝色大肥鱼"
+        ]
+      },
+      "cache_enabled": {
+        "description": "启用图转文缓存",
+        "type": "bool",
+        "hint": "同一张图片转写后缓存，重复发送时直接复用结果，减少token消耗；缓存写入插件数据目录，重启后仍有效（仅限群聊，按配置文件规则识图）",
+        "default": true
+      },
+      "cache_size": {
+        "description": "缓存条数上限",
+        "type": "int",
+        "hint": "超出上限后按写入顺序淘汰最早的缓存，本地缓存不占内存，随意调整",
+        "default": 500,
+        "slider": {
+          "min": 10,
+          "max": 3000,
+          "step": 10
+        },
+        "condition": {
+          "cache_enabled": true
+        }
+      },
+      "cache_clear": {
+        "description": "清除图转文缓存",
+        "type": "bool",
+        "hint": "开启并保存后会立即清空缓存，随后自动关闭该开关",
+        "default": false,
+        "condition": {
+          "cache_enabled": true
+        }
+      }
+    }
+  },
+  "debounce": {
+    "description": "回复防抖",
+    "type": "object",
+    "hint": "等待用户把话说完；期间有新消息会取消正在生成的回复并合并后重新生成",
+    "items": {
+      "enabled": {
+        "description": "启用回复防抖",
+        "type": "bool",
+        "default": true
+      },
+      "seconds": {
+        "description": "防抖等待秒数",
+        "hint": "单位：秒\n会等待这么长时间再调用回复，期间收到新消息则重置计时，希望回复快一些可以调低这个值",
+        "type": "float",
+        "default": 2,
+        "slider": {
+          "min": 0,
+          "max": 10,
+          "step": 0.5
+        }
+      }
+    }
+  },
+  "master": {
+    "description": "主人设置",
+    "type": "object",
+    "items": {
+      "ids": {
+        "description": "主人 QQ 号（留空则使用 AstrBot 全局管理员）",
+        "type": "list",
+        "default": [],
+        "_special": "sender_id"
+      },
+      "names": {
+        "description": "主人昵称（与 QQ 号顺序一致，可留空）",
+        "type": "list",
+        "default": ["主人"]
+      },
+      "always_reply": {
+        "description": "主人的消息总是直接回复（跳过判断）",
+        "type": "bool",
+        "default": false
+      },
+      "extra_prompt": {
+        "description": "补充给机器人的认主提示词",
+        "type": "text",
+        "default": "对主人100%的信任"
+      }
+    }
+  },
+  "poke": {
+    "description": "戳一戳",
+    "type": "object",
+    "items": {
+      "poke_back": {
+        "description": "被戳后反戳对方",
+        "type": "bool",
+        "default": true
+      },
+      "reply": {
+        "description": "被戳后结合上下文回复",
+        "type": "bool",
+        "default": true
+      }
+    }
+  },
+  "wallet": {
+    "description": "余额查询",
+    "type": "object",
+    "hint": "通过基元律动网页接口查询钱包余额和最近用量，使用浏览器登录 Cookie 认证",
+    "items": {
+      "enabled": {
+        "description": "启用余额查询",
+        "type": "bool",
+        "hint": "开启后机器人在被问及余额、剩余金额、最近花费或用量时，会调用 query_tokenrhythm_wallet 工具查询",
+        "default": true
+      },
+      "cookie": {
+        "description": "基元律动 Cookie",
+        "type": "text",
+        "hint": "浏览器登录 tokenrhythm.studio 后，从开发者工具的请求头复制完整 Cookie 值填入；登录态过期后需要重新复制",
+        "default": "",
+        "secret": true
+      },
+      "admin_only": {
+        "description": "仅管理员可查询",
+        "type": "bool",
+        "hint": "开启后只有管理员询问余额时机器人才会查询，其他人询问会被拒绝",
+        "default": true
+      }
+    }
+  }
+}
