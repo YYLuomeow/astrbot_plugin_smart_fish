@@ -2,7 +2,7 @@ name: astrbot_plugin_smart_fish
 display_name: 聪明的鱼
 desc: 基元律动适配版本，支持群聊消息判断回复、回复防抖、认主、戳一戳反戳、图片转述与决策记录，并支持查询基元律动余额与用量
 short_desc: 让小鲸鱼只在被叫到时说话，还能查余额
-version: 1.1.1
+version: 1.1.2
 author: 罗喵
 support_platforms:
   - aiocqhttp

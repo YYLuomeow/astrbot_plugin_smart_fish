@@ -411,9 +411,10 @@ class SmartReplyPlugin(Star):
             directed_reasons.append("master")
         directed = bool(directed_reasons)
 
-        # A newer message from the same sender (or a message addressed to the bot)
-        # supersedes the reply that is currently being generated.
-        if directed or sender == state["active_sender"]:
+        # A message addressed to the bot supersedes the reply being generated.
+        # Other messages must wait for judgement: a message that ends up being
+        # ignored must never abort a reply that already passed judgement.
+        if directed:
             active_event_registry.request_agent_stop_all(umo, exclude=event)
             state["active_sender"] = ""
 
@@ -568,6 +569,10 @@ class SmartReplyPlugin(Star):
         event.set_extra("_smart_fish_context", prior)
         event.set_extra("_smart_fish_sender", sender)
         event.set_extra("enable_streaming", False)
+
+        # The message passed judgement and will reply, so it now supersedes any
+        # generation that is still running for this chat.
+        active_event_registry.request_agent_stop_all(umo, exclude=event)
 
         conversation = await self._get_conversation(event)
         # The converted text already describes the images, so the session model
@@ -961,9 +966,7 @@ class SmartReplyPlugin(Star):
         if wallet is None:
             lines.append("余额查询失败：Cookie 可能已过期。")
         else:
-            balance = (
-                f"钱包余额 {float(wallet.get('availableBalanceCny') or 0):.2f} 元"
-            )
+            balance = f"钱包余额 {float(wallet.get('availableBalanceCny') or 0):.2f} 元"
             frozen = float(wallet.get("frozenBalanceCny") or 0)
             if frozen > 0:
                 balance += f"，冻结 {frozen:.2f} 元"
