@@ -35,14 +35,27 @@ from astrbot.api.web import json_response
 from astrbot.api.web import request as web_request
 from astrbot.core.agent.message import TextPart
 from astrbot.core.utils.active_event_registry import active_event_registry
+from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
+from astrbot.core.utils.media_utils import (
+    ImageInputTooLargeError,
+    prepare_model_image,
+)
 
 PLUGIN_NAME = "astrbot_plugin_smart_fish"
 MAX_DECISION_RECORDS = 100
 # Image-to-text results are cached on disk, keyed by image content hash.
 IMAGE_TEXT_CACHE_FILE = "image_text_cache.json"
+# Bump this when the conversion prompt or image preprocessing changes, so stale
+# results (for example first-frame-only captions of animated images) are ignored.
+IMAGE_TEXT_CACHE_VERSION = "v2"
+# Cache key prefix mapping a platform image URL to its converted description, so
+# chat history can show what an image was about instead of a bare placeholder.
+IMAGE_TEXT_URL_PREFIX = "url:"
 DEFAULT_IMAGE_TEXT_CACHE_LIMIT = 200
 # Fixed size of the per-session sliding window used for judging and injecting.
 CONTEXT_MESSAGE_LIMIT = 100
+# Number of recent chat lines injected as temporary context for a reply.
+CONTEXT_INJECT_LIMIT = 30
 
 DEFAULT_JUDGE_PROMPT = (
     "下面是一段 QQ 群聊记录：\n"
@@ -55,6 +68,18 @@ DEFAULT_JUDGE_PROMPT = (
 DEFAULT_IMAGE_TO_TEXT_PROMPT = (
     "请把这张图片里的文字完整转写出来；如果没有文字，简要描述图片内容。"
     "只输出结果，不要额外说明。"
+)
+
+# Longest-edge cap used when preparing images for the caption model.
+IMAGE_MODEL_MAX_SIZE = 1280
+# Animated images are converted into a single frame montage, so the caption
+# prompt must tell the model to read the frames as one animation.
+ANIMATION_NOTICE = (
+    "\n<system_notice>\n"
+    "The input image is an animation (e.g. GIF) converted into a single image "
+    "of frames in reading order. Describe it as an animation, including motion "
+    "and changes over time; do not mention the conversion or the frame layout.\n"
+    "</system_notice>"
 )
 
 DECISION_PLATFORMS: dict[str, dict[str, str]] = {
@@ -87,6 +112,9 @@ class SmartReplyPlugin(Star):
         )
         self._decision_seq = 0
         self._image_text_cache: dict[str, str] = {}
+        # Pending image path -> platform URL, used to remember which history
+        # message a converted description belongs to.
+        self._image_url_by_path: dict[str, str] = {}
         self._cache_limit = DEFAULT_IMAGE_TEXT_CACHE_LIMIT
         self._cache_path: Path | None = None
         self._load_image_text_cache()
@@ -302,7 +330,12 @@ class SmartReplyPlugin(Star):
 
         umo = event.unified_msg_origin
         state = self._state(umo)
-        prior = list(state["recent"])
+        # Poke notices carry no text, so the platform history is the only way to
+        # know what the group was talking about (including proactive messages
+        # sent by other plugins).
+        prior = await self._group_history(event, CONTEXT_MESSAGE_LIMIT) or list(
+            state["recent"]
+        )
         # A poke supersedes any generation that is still running.
         active_event_registry.request_agent_stop_all(umo, exclude=event)
         state["active_sender"] = sender
@@ -322,14 +355,20 @@ class SmartReplyPlugin(Star):
         if not poke_config.get("reply", True):
             return
 
-        state["recent"].clear()
         event.set_extra("_smart_fish", True)
         event.set_extra("_smart_fish_context", prior)
         event.set_extra("_smart_fish_sender", sender)
         event.set_extra("enable_streaming", False)
 
         conversation = await self._get_conversation(event)
-        prompt = f"[{event.get_sender_name()}({sender}) 戳了戳你]"
+        # Poke notices carry no text, so the model must not guess group or user
+        # IDs to poke back; the plugin handles the poke itself.
+        group_id = event.get_group_id()
+        scene = f"在群 {group_id} 里" if group_id else "私聊里"
+        prompt = (
+            f"[{event.get_sender_name()}({sender}) {scene}戳了戳你] "
+            "不用调用任何工具戳回去，请结合最近的聊天记录用一句话回应。"
+        )
         yield event.request_llm(prompt=prompt, conversation=conversation)
 
     async def _handle_message(self, event: AstrMessageEvent, messages: list):
@@ -354,7 +393,10 @@ class SmartReplyPlugin(Star):
             elif isinstance(comp, Image):
                 parts.append("[图片]")
                 try:
-                    image_urls.append(await comp.convert_to_file_path())
+                    path = await comp.convert_to_file_path()
+                    image_urls.append(path)
+                    if comp.url:
+                        self._image_url_by_path[path] = str(comp.url)
                 except Exception as exc:  # noqa: BLE001 - skip unreachable images
                     logger.warning(f"[smart_fish] image download failed: {exc}")
             elif isinstance(comp, At):
@@ -365,9 +407,15 @@ class SmartReplyPlugin(Star):
             return
 
         state = self._state(umo)
-        prior = list(state["recent"])
         content = "".join(parts).strip() or "[非文本消息]"
         state["recent"].append(f"{event.get_sender_name()}({sender}): {content}")
+        # Platform history also covers proactive messages sent by other plugins,
+        # which never reach this handler. The in-memory window is the fallback
+        # when the history API is unavailable.
+        history = await self._group_history(event, CONTEXT_MESSAGE_LIMIT)
+        if history and history[-1].endswith(content):
+            history.pop()
+        prior = history or list(state["recent"])[:-1]
 
         global_config = self.context.get_config(umo=umo) or {}
         master_ids = [
@@ -462,6 +510,10 @@ class SmartReplyPlugin(Star):
         ocr_text = ""
         if reply_images and not directed and ocr_enabled:
             ocr_text = await self._image_to_text(event, reply_images)
+        # Drop URL mappings for images that were never converted (for example
+        # addressed messages sent straight to the main model).
+        for path in reply_images:
+            self._image_url_by_path.pop(path, None)
 
         prompt = "\n".join(part for part in (readable, ocr_text) if part).strip()
         prompt = prompt or "[用户发送了图片]"
@@ -590,6 +642,76 @@ class SmartReplyPlugin(Star):
             pending["images"].clear()
             if state["active_sender"] == sender:
                 state["active_sender"] = ""
+
+    async def _group_history(self, event: AstrMessageEvent, limit: int) -> list[str]:
+        """Read recent group chat lines from the platform history API.
+
+        Messages sent proactively by other plugins never pass through this
+        plugin, so the in-memory window misses them and replies to those
+        messages look unrelated. The platform history is complete, so it is
+        preferred whenever it can be fetched.
+
+        Args:
+            event: Event used to resolve the bot client and the group id.
+            limit: Maximum number of history messages to convert.
+
+        Returns:
+            Chat lines shaped as ``昵称(id): 内容`` in chronological order, or an
+            empty list for private chats and failed requests.
+        """
+        group_id = event.get_group_id()
+        bot = getattr(event, "bot", None)
+        if not group_id or bot is None:
+            return []
+        try:
+            data = await bot.call_action(
+                "get_group_msg_history",
+                group_id=int(group_id),
+                count=max(limit, 1),
+            )
+        except Exception as exc:  # noqa: BLE001 - history is optional context
+            logger.warning(f"[smart_fish] group history fetch failed: {exc}")
+            return []
+        raw_messages = data.get("messages") if isinstance(data, dict) else None
+        if not isinstance(raw_messages, list):
+            return []
+
+        lines: list[str] = []
+        for item in raw_messages[-max(limit, 1) :]:
+            if not isinstance(item, dict):
+                continue
+            sender = item.get("sender") or {}
+            name = str(sender.get("card") or sender.get("nickname") or "").strip()
+            uid = sender.get("user_id") or item.get("user_id") or ""
+            parts: list[str] = []
+            for segment in item.get("message") or []:
+                if not isinstance(segment, dict):
+                    continue
+                seg_type = segment.get("type")
+                seg_data = segment.get("data") or {}
+                if seg_type == "text":
+                    parts.append(str(seg_data.get("text") or ""))
+                elif seg_type == "image":
+                    # Prefer a previously converted description so the judge can
+                    # read what the image was about; keep it short to save tokens.
+                    image_url = str(seg_data.get("url") or "")
+                    caption = (
+                        self._image_text_cache.get(
+                            f"{IMAGE_TEXT_URL_PREFIX}{image_url}", ""
+                        )
+                        if image_url
+                        else ""
+                    )
+                    parts.append(f"[图片: {caption[:80]}]" if caption else "[图片]")
+                elif seg_type == "at":
+                    parts.append(f"@{seg_data.get('qq')}")
+                elif seg_type == "reply":
+                    parts.append("[引用]")
+                elif seg_type == "face":
+                    parts.append("[表情]")
+            content = "".join(parts).strip() or "[非文本消息]"
+            lines.append(f"{name or '未知用户'}({uid}): {content}")
+        return lines
 
     async def _judge(
         self,
@@ -891,23 +1013,52 @@ class SmartReplyPlugin(Star):
         for index, path in enumerate(image_urls, 1):
             if not path:
                 continue
+            image_url = self._image_url_by_path.pop(path, "")
             # Reuse conversions for the exact same image bytes and prompt.
             cache_key = ""
             try:
                 with open(path, "rb") as file:
                     digest = hashlib.sha256(file.read()).hexdigest()
-                cache_key = f"{digest}:{prompt}"
+                cache_key = f"{IMAGE_TEXT_CACHE_VERSION}:{digest}:{prompt}"
             except OSError as exc:
                 logger.warning(f"[smart_fish] image {index}/{total} hash failed: {exc}")
             cached = cache.get(cache_key) if cache_enabled and cache_key else None
             if cached:
                 texts.append(cached)
                 cached_count += 1
+                if image_url and cache_enabled:
+                    cache[f"{IMAGE_TEXT_URL_PREFIX}{image_url}"] = cached
+                    self._save_image_text_cache()
                 continue
+            # Animated images (GIF/WebP) only expose their first frame to the
+            # model, so mirror the core caption pipeline: convert them into a
+            # single 3x3 frame montage before sending.
+            prepared_path = path
+            is_montage = False
+            needs_cleanup = False
+            try:
+                prepared = await prepare_model_image(
+                    path,
+                    max_size=IMAGE_MODEL_MAX_SIZE,
+                    output_dir=Path(get_astrbot_temp_path()),
+                )
+            except ImageInputTooLargeError as exc:
+                logger.warning(
+                    f"[smart_fish] image {index}/{total} skipped as oversized: {exc}"
+                )
+                continue
+            except Exception as exc:  # noqa: BLE001 - fall back to the raw file
+                logger.warning(
+                    f"[smart_fish] image {index}/{total} prepare failed: {exc}"
+                )
+                prepared = None
+            if prepared:
+                prepared_path, is_montage, needs_cleanup, _ = prepared
+            request_prompt = prompt + ANIMATION_NOTICE if is_montage else prompt
             try:
                 response = await provider.text_chat(
-                    prompt=prompt,
-                    image_urls=[path],
+                    prompt=request_prompt,
+                    image_urls=[prepared_path],
                     persist=False,
                 )
                 content = (response.completion_text or "").strip()
@@ -916,10 +1067,15 @@ class SmartReplyPlugin(Star):
                     f"[smart_fish] image {index}/{total} to text failed: {exc}"
                 )
                 continue
+            finally:
+                if needs_cleanup:
+                    Path(prepared_path).unlink(missing_ok=True)
             if content:
                 texts.append(content)
                 if cache_enabled and cache_key:
                     cache[cache_key] = content
+                    if image_url:
+                        cache[f"{IMAGE_TEXT_URL_PREFIX}{image_url}"] = content
                     while len(cache) > self._cache_limit:
                         cache.pop(next(iter(cache)))
                     self._save_image_text_cache()
@@ -937,11 +1093,11 @@ class SmartReplyPlugin(Star):
         )
         return text
 
-    @filter.llm_tool(name="query_tokenrhythm_wallet")
-    async def query_tokenrhythm_wallet(
+    @filter.llm_tool(name="query_wallet_and_token")
+    async def query_wallet_and_token(
         self, event: AstrMessageEvent, days: int = 7
     ) -> str:
-        """查询基元律动（TokenRhythm）的钱包余额和最近用量（花费、Token、调用次数、主要模型）。当用户询问机器人还剩多少钱、余额、最近花了多少钱或用量情况时调用。
+        """查询钱包余额和最近用量（花费、Token、调用次数、主要模型）。当用户询问机器人钱包或者口袋还剩多少钱、余额、最近花了多少钱、吃了多少token或者花了多少token情况时调用。
 
         Args:
             days (int): 用量统计天数，统计最近 N 天（含今天），默认 7 天，范围 1-90
@@ -1150,14 +1306,19 @@ class SmartReplyPlugin(Star):
 
         context_lines = event.get_extra("_smart_fish_context") or []
         ltm_settings = global_config.get("provider_ltm_settings") or {}
-        if (
-            context_lines
-            and event.get_message_type() == MessageType.GROUP_MESSAGE
-            and not ltm_settings.get("group_icl_enable", False)
+        # Group ICL only injects history for messages it recorded, so poke
+        # notices (which carry no text) always need the context injected here.
+        is_poke = any(isinstance(comp, Poke) for comp in event.get_messages())
+        if context_lines and (
+            is_poke
+            or (
+                event.get_message_type() == MessageType.GROUP_MESSAGE
+                and not ltm_settings.get("group_icl_enable", False)
+            )
         ):
             context_text = (
                 "<system_reminder>\n"
-                "以下是这个群最近的聊天记录（可能与你无关），仅用于理解上下文，"
+                "以下是最近的聊天记录（可能与你无关），仅用于理解上下文，"
                 "请只回应与你相关的内容，不要逐条回复：\n"
                 + "\n".join(context_lines[-30:])
                 + "\n</system_reminder>"

@@ -24,7 +24,7 @@
       "judge_context_count": {
         "description": "判断携带的最近群聊条数",
         "type": "int",
-        "hint": "LLM 与 JEV 判断共用的上下文条数；0 表示只判断当前消息",
+        "hint": "读取群聊历史消息作为判断上下文；0 表示只判断当前消息",
         "default": 10,
         "slider": {
           "min": 0,
