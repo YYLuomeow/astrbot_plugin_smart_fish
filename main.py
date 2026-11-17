@@ -1320,7 +1320,7 @@ class SmartReplyPlugin(Star):
                 "<system_reminder>\n"
                 "以下是最近的聊天记录（可能与你无关），仅用于理解上下文，"
                 "请只回应与你相关的内容，不要逐条回复：\n"
-                + "\n".join(context_lines[-30:])
+                + "\n".join(context_lines[-CONTEXT_INJECT_LIMIT:])
                 + "\n</system_reminder>"
             )
             req.extra_user_content_parts.append(

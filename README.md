@@ -31,29 +31,29 @@
 
 ### 消息判断 `judge`
 
-| 配置项 | 说明 |
-| --- | --- |
-| `enabled` | 是否启用消息判断 |
-| `mode` | `llm` 使用对话模型判断，`decision` 使用决策模型平台判断 |
-| `judge_context_count` | 判断时携带的最近群聊条数，0 表示只判断当前消息 |
-| `threshold` | 判定为「在和我说话」的概率阈值，默认 0.55 |
-| `llm_provider_id` | LLM 判断使用的模型，留空使用当前会话模型 |
-| `platform` | 决策平台：`tokenrhythm`（基元律动）或 `typesafe` |
-| `tokenrhythm_*` / `typesafe_*` | 对应平台的 API 地址、API Key、模型 ID，留空使用默认值 |
-| `decision_question` | 决策模型使用的判断问题 |
-| `prompt` | LLM 判断提示词，支持 `{context}` 与 `{message}` 占位符 |
+| 配置项                            | 说明                                         |
+| ------------------------------ | ------------------------------------------ |
+| `enabled`                      | 是否启用消息判断                                   |
+| `mode`                         | `llm` 使用对话模型判断，`decision` 使用决策模型平台判断       |
+| `judge_context_count`          | 判断时携带的最近群聊条数，0 表示只判断当前消息                   |
+| `threshold`                    | 判定为「在和我说话」的概率阈值，默认 0.55                    |
+| `llm_provider_id`              | LLM 判断使用的模型，留空使用当前会话模型                     |
+| `platform`                     | 决策平台：`tokenrhythm`（基元律动）或 `typesafe`       |
+| `tokenrhythm_*` / `typesafe_*` | 对应平台的 API 地址、API Key、模型 ID，留空使用默认值         |
+| `decision_question`            | 决策模型使用的判断问题                                |
+| `prompt`                       | LLM 判断提示词，支持 `{context}` 与 `{message}` 占位符 |
 
 ### 图片回复 `image_to_text`
 
-| 配置项 | 说明 |
-| --- | --- |
-| `enabled` | 是否启用图转文 |
-| `provider_id` | 图转文模型，留空使用当前会话模型（需支持图片输入） |
-| `prompt` | 图转文提示词 |
-| `wake_words` | 转述文字包含其中任意一个词时回复 |
-| `cache_enabled` | 是否缓存图转文结果 |
-| `cache_size` | 缓存条数上限，超出后按写入顺序淘汰 |
-| `cache_clear` | 开启并保存后立即清空缓存，随后自动关闭 |
+| 配置项             | 说明                        |
+| --------------- | ------------------------- |
+| `enabled`       | 是否启用图转文                   |
+| `provider_id`   | 图转文模型，留空使用当前会话模型（需支持图片输入） |
+| `prompt`        | 图转文提示词                    |
+| `wake_words`    | 转述文字包含其中任意一个词时回复          |
+| `cache_enabled` | 是否缓存图转文结果                 |
+| `cache_size`    | 缓存条数上限，超出后按写入顺序淘汰         |
+| `cache_clear`   | 开启并保存后立即清空缓存，随后自动关闭       |
 
 ### 回复防抖 `debounce`
 
@@ -69,11 +69,11 @@
 
 ### 余额查询 `wallet`
 
-| 配置项 | 说明 |
-| --- | --- |
-| `enabled` | 启用余额查询工具 |
-| `cookie` | 基元律动网页登录 Cookie（密文保存），未填写时工具直接拒绝查询 |
-| `admin_only` | 仅管理员可查询，其他人询问会被拒绝 |
+| 配置项          | 说明                                 |
+| ------------ | ---------------------------------- |
+| `enabled`    | 启用余额查询工具                           |
+| `cookie`     | 基元律动网页登录 Cookie（密文保存），未填写时工具直接拒绝查询 |
+| `admin_only` | 仅管理员可查询，其他人询问会被拒绝                  |
 
 Cookie 获取方式：浏览器登录 [tokenrhythm.studio](https://tokenrhythm.studio)，打开开发者工具的 Network 面板，任选一个 `/api/` 请求，复制请求头中的完整 `Cookie` 值。Cookie 属于登录态，过期后需要重新复制。
 
@@ -91,7 +91,7 @@ Cookie 获取方式：浏览器登录 [tokenrhythm.studio](https://tokenrhythm.s
 示例输出：
 
 ```text
-钱包余额 96.19 元（赠送 46.19 元、充值 50.00 元）。
+钱包余额 96.19 元。
 最近 7 天（2026-11-05 ~ 2026-11-11）花费 8.84 元，调用 1278 次，Token 1663.6 万（输入 1610.6 万 / 输出 52.9 万）。
 主要模型：DeepSeek V4.1 Flash 1017 6.25 元（71%）、Qwen3.8 Flash 2.59 元（29%）、GLM-5.3 Flash 0.01 元（0%）。
 ```
