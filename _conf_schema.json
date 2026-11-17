@@ -7,7 +7,8 @@
       "鱼来",
       "鱼呢",
       "小鲸鱼",
-      "大肥鱼"
+      "大肥鱼",
+      "鲸鲸"
     ]
   },
   "judge": {
@@ -28,7 +29,7 @@
         "default": 10,
         "slider": {
           "min": 0,
-          "max": 50,
+          "max": 100,
           "step": 1
         }
       },
@@ -182,7 +183,7 @@
       "prompt": {
         "description": "图转文提示词",
         "type": "text",
-        "default": "请完成两个任务：\n任务1：用中文客观描述这张图片的内容（人物、场景、文字、元素等），不做评价\n任务2：判断该图片是否与“DeepSeek小鲸鱼”这一形象或话题有关联，或是否具备讨论度，满足任意条件即为相关\n输出格式严格如下：\n[图片描述]\n[判定：<RESULT>]\n（说明：<RESULT> 只能是 <MATCHED> 或 <MISS>，不要输出其他内容）"
+        "default": "请完成两个任务：\n任务1：用中文客观描述这张图片的内容（人物、场景、文字、元素等）\n任务2：判断该图片是否与“DeepSeek小鲸鱼”这一形象或话题有关联，或是否具备讨论度，满足任意条件即为相关\n输出格式严格如下：\n[图片描述]\n[判定：<RESULT>]\n（说明：<RESULT> 只能是 <MATCHED> 或 <MISS>，不要输出其他内容）"
       },
       "wake_words": {
         "description": "图转文主动唤醒词",
@@ -256,6 +257,12 @@
     "description": "主人设置",
     "type": "object",
     "items": {
+      "enabled": {
+        "description": "启用认主",
+        "type": "bool",
+        "hint": "关闭后不再注入主人身份提示，「总是直接回复」也不再生效",
+        "default": true
+      },
       "ids": {
         "description": "主人 QQ 号（留空则使用 AstrBot 全局管理员）",
         "type": "list",
@@ -292,6 +299,159 @@
         "description": "被戳后结合上下文回复",
         "type": "bool",
         "default": true
+      }
+    }
+  },
+  "proactive": {
+    "description": "主动聊天",
+    "type": "object",
+    "hint": "长时间没人说话时机器人主动开话题；消息通过正常回复流程发送，受人格、工具和回复钩子影响",
+    "items": {
+      "group": {
+        "description": "群聊主动聊天",
+        "type": "object",
+        "items": {
+          "enabled": {
+            "description": "启用群聊主动聊天",
+            "type": "bool",
+            "default": false
+          },
+          "sessions": {
+            "description": "主动聊天的群聊列表",
+            "type": "list",
+            "hint": "只对这些群主动聊天，格式：aiocqhttp:GroupMessage:群号",
+            "default": []
+          },
+          "min_interval_minutes": {
+            "description": "最小触发间隔 (分钟)",
+            "type": "int",
+            "hint": "从上一条消息起算，空闲达到随机间隔后才会主动说话",
+            "default": 60,
+            "slider": {
+              "min": 5,
+              "max": 1440,
+              "step": 5
+            }
+          },
+          "max_interval_minutes": {
+            "description": "最大触发间隔 (分钟)",
+            "type": "int",
+            "hint": "实际触发时间在最小与最大间隔之间随机，避免固定时间点",
+            "default": 180,
+            "slider": {
+              "min": 5,
+              "max": 1440,
+              "step": 5
+            }
+          },
+          "quiet_hours": {
+            "description": "免打扰时段",
+            "type": "list",
+            "hint": "格式 HH:MM-HH:MM，可多条；支持跨零点，如 23:00-08:00",
+            "default": ["23:00-09:00"]
+          },
+          "max_unanswered": {
+            "description": "最大未回复次数上限",
+            "type": "int",
+            "hint": "连续主动说话这么多次都没人回复后停止，直到有人发言再恢复",
+            "default": 3,
+            "slider": {
+              "min": 1,
+              "max": 10,
+              "step": 1
+            }
+          },
+          "history_count": {
+            "description": "话题参考的最近聊天条数",
+            "type": "int",
+            "hint": "主动说话前读取的聊天记录条数，仅用于生成话题",
+            "default": 20,
+            "slider": {
+              "min": 1,
+              "max": 100,
+              "step": 1
+            }
+          },
+          "prompt": {
+            "description": "主动聊天提示词，支持 {context} 占位符",
+            "type": "text",
+            "hint": "默认即内置提示词；{context} 会被替换为最近的聊天记录",
+            "default": "<system_reminder>\n当前会话已经很久没有新消息了。参考下面的聊天记录，接上之前的话题，或者自然地开启一个轻松的新话题，主动说一两句话活跃气氛。\n只输出你要发送的内容：不要提到这条提醒，不要复述聊天记录，不要 @ 任何人。\n最近聊天记录：\n{context}\n</system_reminder>"
+          }
+        }
+      },
+      "private": {
+        "description": "私聊主动聊天",
+        "type": "object",
+        "items": {
+          "enabled": {
+            "description": "启用私聊主动聊天",
+            "type": "bool",
+            "default": false
+          },
+          "sessions": {
+            "description": "主动聊天的私聊列表",
+            "type": "list",
+            "hint": "只对这些私聊主动聊天，格式：aiocqhttp:FriendMessage:QQ号",
+            "default": []
+          },
+          "min_interval_minutes": {
+            "description": "最小触发间隔 (分钟)",
+            "type": "int",
+            "hint": "从上一条消息起算，空闲达到随机间隔后才会主动说话",
+            "default": 60,
+            "slider": {
+              "min": 5,
+              "max": 1440,
+              "step": 5
+            }
+          },
+          "max_interval_minutes": {
+            "description": "最大触发间隔 (分钟)",
+            "type": "int",
+            "hint": "实际触发时间在最小与最大间隔之间随机，避免固定时间点",
+            "default": 180,
+            "slider": {
+              "min": 5,
+              "max": 1440,
+              "step": 5
+            }
+          },
+          "quiet_hours": {
+            "description": "免打扰时段",
+            "type": "list",
+            "hint": "格式 HH:MM-HH:MM，可多条；支持跨零点，如 23:00-08:00",
+            "default": ["23:00-09:00"]
+          },
+          "max_unanswered": {
+            "description": "最大未回复次数上限",
+            "type": "int",
+            "hint": "连续主动说话这么多次都没人回复后停止，直到有人发言再恢复",
+            "default": 3,
+            "slider": {
+              "min": 1,
+              "max": 10,
+              "step": 1
+            }
+          },
+          "history_count": {
+            "description": "话题参考的最近聊天条数",
+            "type": "int",
+            "hint": "主动说话前读取的聊天记录条数，仅用于生成话题",
+            "default": 20,
+            "slider": {
+              "min": 1,
+              "max": 100,
+              "step": 1
+            }
+          },
+          "prompt": {
+            "description": "主动聊天提示词，支持 {context} 占位符",
+            "type": "text",
+            "hint": "默认即内置提示词；{context} 会被替换为最近的聊天记录",
+            "default": "<system_reminder>\n当前会话已经很久没有新消息了。参考下面的聊天记录，接上之前的话题，或者自然地开启一个轻松的新话题，主动说一两句话活跃气氛。\n只输出你要发送的内容：不要提到这条提醒，不要复述聊天记录，不要 @ 任何人。\n最近聊天记录：\n{context}\n</system_reminder>"
+          }
+        }
       }
     }
   },

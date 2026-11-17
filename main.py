@@ -41,6 +41,8 @@ from astrbot.core.utils.media_utils import (
     prepare_model_image,
 )
 
+from .proactive import ProactiveChatter, format_history_lines
+
 PLUGIN_NAME = "astrbot_plugin_smart_fish"
 MAX_DECISION_RECORDS = 100
 # Image-to-text results are cached on disk, keyed by image content hash.
@@ -130,6 +132,15 @@ class SmartReplyPlugin(Star):
             ["POST"],
             "Clear reply judgement records",
         )
+        self._proactive = ProactiveChatter(self)
+
+    async def initialize(self) -> None:
+        """Start the proactive chat scheduler when the plugin is loaded."""
+        self._proactive.start()
+
+    async def terminate(self) -> None:
+        """Stop the proactive scheduler before the plugin is unloaded."""
+        await self._proactive.stop()
 
     def _record_judgement(self, record: dict[str, Any]) -> int:
         """Append one judgement record shown by the plugin view.
@@ -299,8 +310,15 @@ class SmartReplyPlugin(Star):
         Yields:
             Provider requests that produce replies through the pipeline.
         """
+        # Proactive wakeups are queued by this plugin itself and are not user input.
+        if event.get_extra("smart_fish_proactive") or (
+            getattr(event, "event_kind", "message") != "message"
+        ):
+            return
         if event.get_extra("handlers_parsed_params"):
             return
+        # Real traffic resets the idle timer used by proactive chat.
+        self._proactive.note_activity(event.unified_msg_origin)
         # This plugin owns the reply decision, so the default LLM call is blocked.
         event.should_call_llm(True)
 
@@ -418,11 +436,14 @@ class SmartReplyPlugin(Star):
         prior = history or list(state["recent"])[:-1]
 
         global_config = self.context.get_config(umo=umo) or {}
-        master_ids = [
-            str(item) for item in (self.config.get("master") or {}).get("ids") or []
-        ]
-        if not master_ids:
-            master_ids = [str(item) for item in global_config.get("admins_id") or []]
+        master_config = self.config.get("master") or {}
+        master_ids: list[str] = []
+        if master_config.get("enabled", True):
+            master_ids = [str(item) for item in master_config.get("ids") or []]
+            if not master_ids:
+                master_ids = [
+                    str(item) for item in global_config.get("admins_id") or []
+                ]
         is_master = sender in master_ids
 
         at_bot = any(
@@ -453,9 +474,7 @@ class SmartReplyPlugin(Star):
             prefix.strip() for prefix in wake_prefixes
         ):
             directed_reasons.append("wake")
-        if is_master and bool(
-            (self.config.get("master") or {}).get("always_reply", True)
-        ):
+        if is_master and bool(master_config.get("always_reply", True)):
             directed_reasons.append("master")
         directed = bool(directed_reasons)
 
@@ -505,13 +524,24 @@ class SmartReplyPlugin(Star):
         ocr_config = self.config.get("image_to_text") or {}
         ocr_enabled = bool(ocr_config.get("enabled", True))
 
-        # Images never go to the judge. When image-to-text is enabled, only a
-        # wake word in the converted text can trigger a reply.
+        # Images never go to the judge. Every image is converted to text first,
+        # including addressed messages and private chats, so the session model
+        # receives one consistent description instead of raw images.
         ocr_text = ""
-        if reply_images and not directed and ocr_enabled:
+        if reply_images and ocr_enabled:
             ocr_text = await self._image_to_text(event, reply_images)
+        # Store the converted description in the in-memory window so later
+        # judgements and proactive topics see image content, like group history.
+        if ocr_text:
+            prefix = f"{event.get_sender_name()}({sender}): "
+            recent = state["recent"]
+            if recent and recent[-1].startswith(prefix):
+                recorded = recent[-1][len(prefix) :]
+                for line in ocr_text.splitlines():
+                    recorded = recorded.replace("[图片]", f"[图片: {line}]", 1)
+                recent[-1] = prefix + recorded
         # Drop URL mappings for images that were never converted (for example
-        # addressed messages sent straight to the main model).
+        # when conversion is disabled).
         for path in reply_images:
             self._image_url_by_path.pop(path, None)
 
@@ -675,43 +705,20 @@ class SmartReplyPlugin(Star):
         raw_messages = data.get("messages") if isinstance(data, dict) else None
         if not isinstance(raw_messages, list):
             return []
+        return format_history_lines(raw_messages, limit, self._image_caption)
 
-        lines: list[str] = []
-        for item in raw_messages[-max(limit, 1) :]:
-            if not isinstance(item, dict):
-                continue
-            sender = item.get("sender") or {}
-            name = str(sender.get("card") or sender.get("nickname") or "").strip()
-            uid = sender.get("user_id") or item.get("user_id") or ""
-            parts: list[str] = []
-            for segment in item.get("message") or []:
-                if not isinstance(segment, dict):
-                    continue
-                seg_type = segment.get("type")
-                seg_data = segment.get("data") or {}
-                if seg_type == "text":
-                    parts.append(str(seg_data.get("text") or ""))
-                elif seg_type == "image":
-                    # Prefer a previously converted description so the judge can
-                    # read what the image was about; keep it short to save tokens.
-                    image_url = str(seg_data.get("url") or "")
-                    caption = (
-                        self._image_text_cache.get(
-                            f"{IMAGE_TEXT_URL_PREFIX}{image_url}", ""
-                        )
-                        if image_url
-                        else ""
-                    )
-                    parts.append(f"[图片: {caption[:80]}]" if caption else "[图片]")
-                elif seg_type == "at":
-                    parts.append(f"@{seg_data.get('qq')}")
-                elif seg_type == "reply":
-                    parts.append("[引用]")
-                elif seg_type == "face":
-                    parts.append("[表情]")
-            content = "".join(parts).strip() or "[非文本消息]"
-            lines.append(f"{name or '未知用户'}({uid}): {content}")
-        return lines
+    def _image_caption(self, image_url: str) -> str:
+        """Return the cached description of an image URL, or an empty string.
+
+        Args:
+            image_url: Platform URL of the image in a history message.
+
+        Returns:
+            The converted description when the image was captioned before.
+        """
+        if not image_url:
+            return ""
+        return self._image_text_cache.get(f"{IMAGE_TEXT_URL_PREFIX}{image_url}", "")
 
     async def _judge(
         self,
@@ -1270,39 +1277,44 @@ class SmartReplyPlugin(Star):
         umo = event.unified_msg_origin
         global_config = self.context.get_config(umo=umo) or {}
         master_config = self.config.get("master") or {}
-        master_ids = [str(item) for item in master_config.get("ids") or []]
-        if not master_ids:
-            master_ids = [str(item) for item in global_config.get("admins_id") or []]
-        master_names = [str(item) for item in master_config.get("names") or []]
-        masters_text = (
-            "、".join(
-                f"{master_names[index]}({qq})" if index < len(master_names) else qq
-                for index, qq in enumerate(master_ids)
-            )
-            or "未配置"
-        )
-
         sender = str(event.get_sender_id())
         sender_name = event.get_sender_name() or sender
-        if sender in master_ids:
-            identity = "主人"
-        elif event.is_admin():
-            identity = "管理员"
-        else:
-            identity = "普通群友"
-        extra_prompt = str(master_config.get("extra_prompt") or "").strip()
+        if master_config.get("enabled", True):
+            master_ids = [str(item) for item in master_config.get("ids") or []]
+            if not master_ids:
+                master_ids = [
+                    str(item) for item in global_config.get("admins_id") or []
+                ]
+            master_names = [str(item) for item in master_config.get("names") or []]
+            masters_text = (
+                "、".join(
+                    f"{master_names[index]}({qq})" if index < len(master_names) else qq
+                    for index, qq in enumerate(master_ids)
+                )
+                or "未配置"
+            )
 
-        identity_text = (
-            "<system_reminder>\n"
-            f"当前和你对话的用户：{sender_name}({sender})，身份：{identity}。\n"
-            f"你的主人 QQ：{masters_text}。\n"
-            "如果对方是你的主人，请用熟悉、亲近、有感情的语气回应，可以称呼昵称，"
-            "绝不能用对待陌生人的客套语气；如果对方是管理员，请礼貌配合；"
-            "其他群友保持友好但不过分亲密。\n"
-            f"{extra_prompt}\n"
-            "</system_reminder>"
-        )
-        req.extra_user_content_parts.append(TextPart(text=identity_text).mark_as_temp())
+            if sender in master_ids:
+                identity = "主人"
+            elif event.is_admin():
+                identity = "管理员"
+            else:
+                identity = "普通群友"
+            extra_prompt = str(master_config.get("extra_prompt") or "").strip()
+
+            identity_text = (
+                "<system_reminder>\n"
+                f"当前和你对话的用户：{sender_name}({sender})，身份：{identity}。\n"
+                f"你的主人 QQ：{masters_text}。\n"
+                "如果对方是你的主人，请用熟悉、亲近、有感情的语气回应，可以称呼昵称，"
+                "绝不能用对待陌生人的客套语气；如果对方是管理员，请礼貌配合；"
+                "其他群友保持友好但不过分亲密。\n"
+                f"{extra_prompt}\n"
+                "</system_reminder>"
+            )
+            req.extra_user_content_parts.append(
+                TextPart(text=identity_text).mark_as_temp()
+            )
 
         context_lines = event.get_extra("_smart_fish_context") or []
         ltm_settings = global_config.get("provider_ltm_settings") or {}
