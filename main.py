@@ -317,6 +317,11 @@ class SmartReplyPlugin(Star):
             return
         if event.get_extra("handlers_parsed_params"):
             return
+        # Some platforms report the bot's own outgoing messages. They are not
+        # user activity: counting them would reset the unanswered cap, and
+        # judging them would make the bot reply to itself.
+        if str(event.get_sender_id()) == str(event.get_self_id()):
+            return
         # Real traffic resets the idle timer used by proactive chat.
         self._proactive.note_activity(event.unified_msg_origin)
         # This plugin owns the reply decision, so the default LLM call is blocked.
@@ -527,18 +532,29 @@ class SmartReplyPlugin(Star):
         # Images never go to the judge. Every image is converted to text first,
         # including addressed messages and private chats, so the session model
         # receives one consistent description instead of raw images.
-        ocr_text = ""
+        captions: list[str] = []
         if reply_images and ocr_enabled:
-            ocr_text = await self._image_to_text(event, reply_images)
+            captions = await self._image_to_text(event, reply_images)
+        ocr_text = "\n".join(caption for caption in captions if caption).strip()
         # Store the converted description in the in-memory window so later
         # judgements and proactive topics see image content, like group history.
+        # Captions are paired with placeholders by position, so a failed image
+        # keeps its bare placeholder instead of shifting later descriptions.
         if ocr_text:
             prefix = f"{event.get_sender_name()}({sender}): "
             recent = state["recent"]
             if recent and recent[-1].startswith(prefix):
-                recorded = recent[-1][len(prefix) :]
-                for line in ocr_text.splitlines():
-                    recorded = recorded.replace("[图片]", f"[图片: {line}]", 1)
+                pieces = recent[-1][len(prefix) :].split("[图片]")
+                placeholders = pieces[1:]
+                # Pending images may cover several merged messages; only the
+                # descriptions of the last message belong to its history line.
+                offset = max(len(captions) - len(placeholders), 0)
+                recorded = pieces[0]
+                for index, piece in enumerate(placeholders):
+                    position = offset + index
+                    caption = captions[position] if position < len(captions) else ""
+                    label = " ".join(caption.split())
+                    recorded += (f"[图片: {label}]" if label else "[图片]") + piece
                 recent[-1] = prefix + recorded
         # Drop URL mappings for images that were never converted (for example
         # when conversion is disabled).
@@ -977,7 +993,7 @@ class SmartReplyPlugin(Star):
         self,
         event: AstrMessageEvent,
         image_urls: list[str],
-    ) -> str:
+    ) -> list[str]:
         """Convert attached images into text with the configured chat model.
 
         Args:
@@ -985,11 +1001,12 @@ class SmartReplyPlugin(Star):
             image_urls: Local paths of the images to convert.
 
         Returns:
-            The converted text, or an empty string when disabled or failed.
+            One description per input image in the same order; failed or
+            skipped images keep an empty string so positions stay aligned.
         """
         config = self.config.get("image_to_text") or {}
         if not config.get("enabled", True) or not image_urls:
-            return ""
+            return []
 
         provider = None
         provider_id = str(config.get("provider_id") or "").strip()
@@ -1008,7 +1025,7 @@ class SmartReplyPlugin(Star):
             )
         if not isinstance(provider, Provider):
             logger.warning("[smart_fish] no chat provider available for image to text")
-            return ""
+            return []
 
         prompt = str(config.get("prompt") or DEFAULT_IMAGE_TO_TEXT_PROMPT)
         started = time.perf_counter()
@@ -1019,6 +1036,7 @@ class SmartReplyPlugin(Star):
         cache_enabled = bool(config.get("cache_enabled", True))
         for index, path in enumerate(image_urls, 1):
             if not path:
+                texts.append("")
                 continue
             image_url = self._image_url_by_path.pop(path, "")
             # Reuse conversions for the exact same image bytes and prompt.
@@ -1053,6 +1071,7 @@ class SmartReplyPlugin(Star):
                 logger.warning(
                     f"[smart_fish] image {index}/{total} skipped as oversized: {exc}"
                 )
+                texts.append("")
                 continue
             except Exception as exc:  # noqa: BLE001 - fall back to the raw file
                 logger.warning(
@@ -1073,12 +1092,13 @@ class SmartReplyPlugin(Star):
                 logger.warning(
                     f"[smart_fish] image {index}/{total} to text failed: {exc}"
                 )
+                texts.append("")
                 continue
             finally:
                 if needs_cleanup:
                     Path(prepared_path).unlink(missing_ok=True)
+            texts.append(content)
             if content:
-                texts.append(content)
                 if cache_enabled and cache_key:
                     cache[cache_key] = content
                     if image_url:
@@ -1091,14 +1111,14 @@ class SmartReplyPlugin(Star):
                     f"[smart_fish] image {index}/{total} to text returned nothing"
                 )
 
-        text = "\n".join(texts).strip()
         duration_ms = int((time.perf_counter() - started) * 1000)
         logger.info(
-            f"[smart_fish] image to text images={total} converted={len(texts)}"
+            f"[smart_fish] image to text images={total} "
+            f"converted={sum(1 for text in texts if text)}"
             f" cached={cached_count} {duration_ms}ms"
             f" provider={provider_id or 'session'}"
         )
-        return text
+        return texts
 
     @filter.llm_tool(name="query_wallet_and_token")
     async def query_wallet_and_token(

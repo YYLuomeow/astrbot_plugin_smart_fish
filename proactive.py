@@ -140,7 +140,13 @@ class ProactiveChatter:
     async def _tick(self) -> None:
         """Send a proactive message for every session whose timer elapsed."""
         now = time.time()
-        for umo, section in self._configured_sessions():
+        configured = self._configured_sessions()
+        # Forget sessions removed from the configuration, otherwise re-adding
+        # one would reuse its expired timer and old unanswered counter.
+        active = {umo for umo, _ in configured}
+        for umo in [umo for umo in self._sessions if umo not in active]:
+            del self._sessions[umo]
+        for umo, section in configured:
             state = self._session_state(umo)
             if state["next_at"] <= 0:
                 state["next_at"] = now + self._next_delay(section)

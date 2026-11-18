@@ -166,7 +166,8 @@
   "image_to_text": {
     "description": "图片回复",
     "type": "object",
-    "hint": "开启后先用对话模型把图片转成文字，在通过唤醒词判断是否回复",
+    "hint": "接管【配置文件>图片转述模型】功能，开启后先用对话模型把图片转成文字，群聊中会根据唤醒词判断是否回复，私聊不走判断流程",
+    "obvious_hint": true,
     "items": {
       "enabled": {
         "description": "启用图转文",
@@ -272,7 +273,9 @@
       "names": {
         "description": "主人昵称（与 QQ 号顺序一致，可留空）",
         "type": "list",
-        "default": ["主人"]
+        "default": [
+          "主人"
+        ]
       },
       "always_reply": {
         "description": "主人的消息总是直接回复（跳过判断）",
@@ -348,7 +351,9 @@
             "description": "免打扰时段",
             "type": "list",
             "hint": "格式 HH:MM-HH:MM，可多条；支持跨零点，如 23:00-08:00",
-            "default": ["23:00-09:00"]
+            "default": [
+              "23:00-09:00"
+            ]
           },
           "max_unanswered": {
             "description": "最大未回复次数上限",
@@ -421,7 +426,9 @@
             "description": "免打扰时段",
             "type": "list",
             "hint": "格式 HH:MM-HH:MM，可多条；支持跨零点，如 23:00-08:00",
-            "default": ["23:00-09:00"]
+            "default": [
+              "23:00-09:00"
+            ]
           },
           "max_unanswered": {
             "description": "最大未回复次数上限",
