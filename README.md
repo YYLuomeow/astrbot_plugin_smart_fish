@@ -61,7 +61,7 @@
 
 ### 主人设置 `master`
 
-`ids` 为主人 QQ 号（留空使用 AstrBot 全局管理员），`names` 为对应昵称，`always_reply` 让主人消息跳过判断，`extra_prompt` 为注入的认主提示词。
+`ids` 为主人 QQ 号（留空使用 AstrBot 全局管理员），`names` 为对应的主人称呼（与 QQ 号顺序一致，留空则使用“主人”）；只有这些称呼对主人生效，其他用户会被明确禁止使用。`always_reply` 让主人消息跳过判断，`extra_prompt` 为注入的认主提示词。
 
 ### 戳一戳 `poke`
 

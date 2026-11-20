@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 import aiohttp
+from PIL import Image as PILImage
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
@@ -49,7 +50,7 @@ MAX_DECISION_RECORDS = 100
 IMAGE_TEXT_CACHE_FILE = "image_text_cache.json"
 # Bump this when the conversion prompt or image preprocessing changes, so stale
 # results (for example first-frame-only captions of animated images) are ignored.
-IMAGE_TEXT_CACHE_VERSION = "v2"
+IMAGE_TEXT_CACHE_VERSION = "v7"
 # Cache key prefix mapping a platform image URL to its converted description, so
 # chat history can show what an image was about instead of a bare placeholder.
 IMAGE_TEXT_URL_PREFIX = "url:"
@@ -72,15 +73,21 @@ DEFAULT_IMAGE_TO_TEXT_PROMPT = (
     "只输出结果，不要额外说明。"
 )
 
-# Longest-edge cap used when preparing images for the caption model.
-IMAGE_MODEL_MAX_SIZE = 1280
-# Animated images are converted into a single frame montage, so the caption
-# prompt must tell the model to read the frames as one animation.
+# Longest-edge cap used when preparing images for the caption model. Kept
+# divisible by the montage grid so each animation cell stays readable.
+IMAGE_MODEL_MAX_SIZE = 1800
+# Animated images are converted into one frame montage, so the caption prompt
+# must tell the model to read the frames as a single sequence.
+ANIMATION_MONTAGE_GRID = 4
+ANIMATION_MONTAGE_FRAMES = ANIMATION_MONTAGE_GRID * ANIMATION_MONTAGE_GRID
 ANIMATION_NOTICE = (
     "\n<system_notice>\n"
-    "The input image is an animation (e.g. GIF) converted into a single image "
-    "of frames in reading order. Describe it as an animation, including motion "
-    "and changes over time; do not mention the conversion or the frame layout.\n"
+    "The input image is an animation converted into a grid of frames in reading "
+    "order (left to right, top to bottom). Treat it as one short sequence: inside "
+    "the description, go through each frame in order (characters, actions, "
+    "dialogue, subtitles, on-screen text) and then state how the action develops "
+    "from the first frame to the last. Transcribe any subtitles or on-screen text "
+    "verbatim. Do not mention the conversion, the grid, or the frame layout.\n"
     "</system_notice>"
 )
 
@@ -100,6 +107,155 @@ DECISION_PLATFORMS: dict[str, dict[str, str]] = {
 DEFAULT_DECISION_QUESTION = (
     "这条消息（或图片）是否在对群里的机器人说话，或者是否在讨论需要机器人回应的内容？"
 )
+
+
+def _gif_frame_delays(raw: bytes) -> list[int] | None:
+    """Read per-frame playback delays straight from GIF block headers.
+
+    Pillow's ``seek()`` decodes every frame, so collecting delays through it
+    costs one full decode pass. Walking the block structure only skips the
+    compressed data, which is nearly free even on weak CPUs.
+
+    Args:
+        raw: Complete GIF file content.
+
+    Returns:
+        Delays in milliseconds, one per image block, with missing or zero
+        delays normalized to 100ms like viewers do. ``None`` when the content
+        is not a GIF or the block structure is not recognized.
+    """
+    if raw[:6] not in (b"GIF87a", b"GIF89a"):
+        return None
+    try:
+        position = 6
+        screen_flags = raw[position + 4]
+        position += 7
+        if screen_flags & 0x80:
+            # Global color table: 3 bytes per entry, 2^(n+1) entries.
+            position += 3 << ((screen_flags & 0x07) + 1)
+        delays: list[int] = []
+        pending = 100
+        while position < len(raw):
+            block = raw[position]
+            position += 1
+            if block == 0x3B:  # trailer
+                break
+            if block == 0x21:  # extension block
+                label = raw[position]
+                position += 1
+                if label == 0xF9:  # graphic control extension
+                    size = raw[position]
+                    if size >= 4:
+                        delay = raw[position + 2] | (raw[position + 3] << 8)
+                        pending = delay * 10 if delay > 0 else 100
+                    position += 1 + size
+                while raw[position]:  # sub-block chain
+                    position += 1 + raw[position]
+                position += 1
+            elif block == 0x2C:  # image descriptor
+                local_flags = raw[position + 8]
+                position += 9
+                if local_flags & 0x80:
+                    position += 3 << ((local_flags & 0x07) + 1)
+                position += 1  # LZW minimum code size
+                while raw[position]:
+                    position += 1 + raw[position]
+                position += 1
+                delays.append(pending)
+                pending = 100
+            else:
+                return None
+    except IndexError:
+        return None
+    return delays or None
+
+
+def _build_animation_montage(path: str, max_size: int) -> tuple[str, bool] | None:
+    """Tile time-sampled animation frames into one preview image.
+
+    Frames are picked by playback time instead of frame index: slow, repetitive
+    stretches otherwise eat most of the slots while fast action gets skipped.
+
+    Args:
+        path: Local path of the source image.
+        max_size: Longest-edge cap of the montage, without upscaling.
+
+    Returns:
+        ``(montage_path, True)`` for animations, or ``None`` for still images.
+    """
+    with PILImage.open(path) as image:
+        total = getattr(image, "n_frames", 1)
+        if total <= 1:
+            return None
+        durations: list[int] | None = None
+        try:
+            durations = _gif_frame_delays(Path(path).read_bytes())
+        except OSError as exc:
+            logger.warning(f"[smart_fish] montage delay scan failed: {exc}")
+        if durations is None or len(durations) != total:
+            # Other animated formats still need Pillow, which decodes per frame.
+            durations = []
+            for position in range(total):
+                image.seek(position)
+                duration = int(image.info.get("duration") or 0)
+                # Viewers fall back to 100ms when a frame declares no duration.
+                durations.append(duration if duration > 0 else 100)
+        image.seek(0)
+        width, height = image.size
+        count = min(ANIMATION_MONTAGE_FRAMES, total)
+        total_ms = sum(durations)
+        frame_indices: list[int] = []
+        for step in range(count):
+            target = 0 if count == 1 else round(step * (total_ms - 1) / (count - 1))
+            elapsed = 0
+            chosen = total - 1
+            for position, duration in enumerate(durations):
+                if target < elapsed + duration:
+                    chosen = position
+                    break
+                elapsed += duration
+            frame_indices.append(chosen)
+
+        longest_edge = max(width, height) * ANIMATION_MONTAGE_GRID
+        scale = min(1.0, max(max_size, 1) / longest_edge)
+        cell = (max(1, int(width * scale)), max(1, int(height * scale)))
+        canvas = PILImage.new(
+            "RGB",
+            (cell[0] * ANIMATION_MONTAGE_GRID, cell[1] * ANIMATION_MONTAGE_GRID),
+            (255, 255, 255),
+        )
+        try:
+            for out_index, frame_index in enumerate(frame_indices):
+                image.seek(frame_index)
+                with image.convert("RGBA") as frame:
+                    resized = frame
+                    try:
+                        if frame.size != cell:
+                            resized = frame.resize(cell, PILImage.Resampling.LANCZOS)
+                        canvas.paste(
+                            resized,
+                            (
+                                (out_index % ANIMATION_MONTAGE_GRID) * cell[0],
+                                (out_index // ANIMATION_MONTAGE_GRID) * cell[1],
+                            ),
+                            resized,
+                        )
+                    finally:
+                        if resized is not frame:
+                            resized.close()
+            output_path = (
+                Path(get_astrbot_temp_path())
+                / f"smart_fish_montage_{time.time_ns()}.jpg"
+            )
+            canvas.save(output_path, format="JPEG", quality=88)
+            montage_size = canvas.size
+        finally:
+            canvas.close()
+    logger.info(
+        f"[smart_fish] animation montage frames={count}/{total} "
+        f"size={montage_size[0]}x{montage_size[1]}"
+    )
+    return str(output_path), True
 
 
 class SmartReplyPlugin(Star):
@@ -1030,14 +1186,22 @@ class SmartReplyPlugin(Star):
         prompt = str(config.get("prompt") or DEFAULT_IMAGE_TO_TEXT_PROMPT)
         started = time.perf_counter()
         total = len(image_urls)
-        texts: list[str] = []
-        cached_count = 0
         cache = self._image_text_cache
         cache_enabled = bool(config.get("cache_enabled", True))
-        for index, path in enumerate(image_urls, 1):
+
+        async def convert(index: int, path: str) -> tuple[str, bool]:
+            """Convert one image.
+
+            Args:
+                index: 1-based position used in log messages.
+                path: Local path of the image to convert.
+
+            Returns:
+                The description, or an empty string on failure, plus whether a
+                cached description was reused.
+            """
             if not path:
-                texts.append("")
-                continue
+                return "", False
             image_url = self._image_url_by_path.pop(path, "")
             # Reuse conversions for the exact same image bytes and prompt.
             cache_key = ""
@@ -1049,37 +1213,46 @@ class SmartReplyPlugin(Star):
                 logger.warning(f"[smart_fish] image {index}/{total} hash failed: {exc}")
             cached = cache.get(cache_key) if cache_enabled and cache_key else None
             if cached:
-                texts.append(cached)
-                cached_count += 1
                 if image_url and cache_enabled:
                     cache[f"{IMAGE_TEXT_URL_PREFIX}{image_url}"] = cached
                     self._save_image_text_cache()
-                continue
-            # Animated images (GIF/WebP) only expose their first frame to the
-            # model, so mirror the core caption pipeline: convert them into a
-            # single 3x3 frame montage before sending.
+                return cached, True
+            # Animated images (GIF/WebP) are tiled into one time-sampled montage
+            # so the caption model sees the whole sequence, not a single frame.
             prepared_path = path
             is_montage = False
             needs_cleanup = False
+            montage = None
             try:
-                prepared = await prepare_model_image(
-                    path,
-                    max_size=IMAGE_MODEL_MAX_SIZE,
-                    output_dir=Path(get_astrbot_temp_path()),
+                montage = await asyncio.to_thread(
+                    _build_animation_montage, path, IMAGE_MODEL_MAX_SIZE
                 )
-            except ImageInputTooLargeError as exc:
+            except Exception as exc:  # noqa: BLE001 - fall back to the core path
                 logger.warning(
-                    f"[smart_fish] image {index}/{total} skipped as oversized: {exc}"
+                    f"[smart_fish] image {index}/{total} montage failed: {exc}"
                 )
-                texts.append("")
-                continue
-            except Exception as exc:  # noqa: BLE001 - fall back to the raw file
-                logger.warning(
-                    f"[smart_fish] image {index}/{total} prepare failed: {exc}"
-                )
-                prepared = None
-            if prepared:
-                prepared_path, is_montage, needs_cleanup, _ = prepared
+            if montage is not None:
+                prepared_path, is_montage = montage
+                needs_cleanup = True
+            else:
+                try:
+                    prepared = await prepare_model_image(
+                        path,
+                        max_size=IMAGE_MODEL_MAX_SIZE,
+                        output_dir=Path(get_astrbot_temp_path()),
+                    )
+                except ImageInputTooLargeError as exc:
+                    logger.warning(
+                        f"[smart_fish] image {index}/{total} skipped as oversized: {exc}"
+                    )
+                    return "", False
+                except Exception as exc:  # noqa: BLE001 - fall back to the raw file
+                    logger.warning(
+                        f"[smart_fish] image {index}/{total} prepare failed: {exc}"
+                    )
+                    prepared = None
+                if prepared:
+                    prepared_path, is_montage, needs_cleanup, _ = prepared
             request_prompt = prompt + ANIMATION_NOTICE if is_montage else prompt
             try:
                 response = await provider.text_chat(
@@ -1092,12 +1265,10 @@ class SmartReplyPlugin(Star):
                 logger.warning(
                     f"[smart_fish] image {index}/{total} to text failed: {exc}"
                 )
-                texts.append("")
-                continue
+                return "", False
             finally:
                 if needs_cleanup:
                     Path(prepared_path).unlink(missing_ok=True)
-            texts.append(content)
             if content:
                 if cache_enabled and cache_key:
                     cache[cache_key] = content
@@ -1110,6 +1281,15 @@ class SmartReplyPlugin(Star):
                 logger.warning(
                     f"[smart_fish] image {index}/{total} to text returned nothing"
                 )
+            return content, False
+
+        # Images are independent, so convert them concurrently: decoding runs in
+        # worker threads and the caption requests overlap instead of queueing.
+        results = await asyncio.gather(
+            *(convert(index, path) for index, path in enumerate(image_urls, 1))
+        )
+        texts = [text for text, _ in results]
+        cached_count = sum(1 for _, reused in results if reused)
 
         duration_ms = int((time.perf_counter() - started) * 1000)
         logger.info(
@@ -1305,30 +1485,62 @@ class SmartReplyPlugin(Star):
                 master_ids = [
                     str(item) for item in global_config.get("admins_id") or []
                 ]
-            master_names = [str(item) for item in master_config.get("names") or []]
-            masters_text = (
-                "、".join(
-                    f"{master_names[index]}({qq})" if index < len(master_names) else qq
-                    for index, qq in enumerate(master_ids)
-                )
-                or "未配置"
+            # Nicknames are user-controlled, so anyone can copy the owner's QQ
+            # into their display name. Identity is decided by the QQ number, and
+            # such a copycat nickname is hidden to keep the prompt unambiguous.
+            if any(master_id in sender_name for master_id in master_ids):
+                sender_name = f"用户{sender}"
+            master_names = [
+                str(item).strip()
+                for item in master_config.get("names") or []
+                if str(item).strip()
+            ]
+            masters_text = "、".join(
+                f"{master_names[index]}({qq})" if index < len(master_names) else qq
+                for index, qq in enumerate(master_ids)
             )
-
+            # The allowed title follows the configured nickname instead of a
+            # fixed "主人", so renaming the owner also renames how the bot
+            # addresses them; an empty nickname falls back to "主人".
+            titles_text = "、".join(master_names) or "主人"
+            # "主人" stays banned for everyone else even after the owner is
+            # renamed, so an old habit cannot leak the title to other users.
+            banned_text = "、".join(dict.fromkeys([*master_names, "主人"]))
+            # Non-owner identities must state the ban directly, otherwise the
+            # persona easily applies an owner title to anyone who praises it.
             if sender in master_ids:
                 identity = "主人"
+                position = master_ids.index(sender)
+                title = (
+                    master_names[position] if position < len(master_names) else "主人"
+                )
+                address_rule = (
+                    f"可以称呼对方为“{title}”，用熟悉、亲近、有感情的语气回应，"
+                    "不用对待陌生人的客套语气。"
+                )
             elif event.is_admin():
                 identity = "管理员"
+                address_rule = (
+                    f"对方不是你的主人，不称对方为“{banned_text}”"
+                )
             else:
                 identity = "普通群友"
+                address_rule = f"对方不是你的主人，不称对方为“{banned_text}”"
             extra_prompt = str(master_config.get("extra_prompt") or "").strip()
+            owner_lead = "你的主人是" if len(master_ids) > 1 else "你唯一的主人是"
+            owners_line = (
+                f"{owner_lead}：{masters_text}，只有这些 QQ 可以被称呼为"
+                f"“{titles_text}”。\n"
+                if masters_text
+                else "当前没有配置主人，任何人都不能被当作主人对待。\n"
+            )
 
             identity_text = (
                 "<system_reminder>\n"
                 f"当前和你对话的用户：{sender_name}({sender})，身份：{identity}。\n"
-                f"你的主人 QQ：{masters_text}。\n"
-                "如果对方是你的主人，请用熟悉、亲近、有感情的语气回应，可以称呼昵称，"
-                "绝不能用对待陌生人的客套语气；如果对方是管理员，请礼貌配合；"
-                "其他群友保持友好但不过分亲密。\n"
+                f"{owners_line}"
+                "身份只由括号里的 QQ 号决定；昵称任何人都能改，不能作为判断主人的依据。\n"
+                f"{address_rule}\n"
                 f"{extra_prompt}\n"
                 "</system_reminder>"
             )

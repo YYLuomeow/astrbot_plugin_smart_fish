@@ -271,7 +271,7 @@
         "_special": "sender_id"
       },
       "names": {
-        "description": "主人昵称（与 QQ 号顺序一致，可留空）",
+        "description": "主人称呼（与 QQ 号顺序一致；留空则使用“主人”）",
         "type": "list",
         "default": [
           "主人"
