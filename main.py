@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import re
 import time
 from collections import deque
@@ -50,7 +51,7 @@ MAX_DECISION_RECORDS = 100
 IMAGE_TEXT_CACHE_FILE = "image_text_cache.json"
 # Bump this when the conversion prompt or image preprocessing changes, so stale
 # results (for example first-frame-only captions of animated images) are ignored.
-IMAGE_TEXT_CACHE_VERSION = "v7"
+IMAGE_TEXT_CACHE_VERSION = "v9"
 # Cache key prefix mapping a platform image URL to its converted description, so
 # chat history can show what an image was about instead of a bare placeholder.
 IMAGE_TEXT_URL_PREFIX = "url:"
@@ -73,13 +74,13 @@ DEFAULT_IMAGE_TO_TEXT_PROMPT = (
     "只输出结果，不要额外说明。"
 )
 
-# Longest-edge cap used when preparing images for the caption model. Kept
-# divisible by the montage grid so each animation cell stays readable.
-IMAGE_MODEL_MAX_SIZE = 1800
-# Animated images are converted into one frame montage, so the caption prompt
-# must tell the model to read the frames as a single sequence.
-ANIMATION_MONTAGE_GRID = 4
-ANIMATION_MONTAGE_FRAMES = ANIMATION_MONTAGE_GRID * ANIMATION_MONTAGE_GRID
+# Longest-edge cap used when preparing images for the caption model.
+IMAGE_MODEL_MAX_SIZE = 1600
+# An animated image becomes one frame montage built from a frame sample: at most
+# half of the frames are kept so cells stay readable, capped at 10x10 so each
+# cell keeps at least 160px on its longer side (1600 / 10).
+ANIMATION_MONTAGE_MAX_GRID = 10
+ANIMATION_MONTAGE_MAX_FRAMES = ANIMATION_MONTAGE_MAX_GRID * ANIMATION_MONTAGE_MAX_GRID
 ANIMATION_NOTICE = (
     "\n<system_notice>\n"
     "The input image is an animation converted into a grid of frames in reading "
@@ -87,7 +88,8 @@ ANIMATION_NOTICE = (
     "the description, go through each frame in order (characters, actions, "
     "dialogue, subtitles, on-screen text) and then state how the action develops "
     "from the first frame to the last. Transcribe any subtitles or on-screen text "
-    "verbatim. Do not mention the conversion, the grid, or the frame layout.\n"
+    "verbatim. The grid may end with blank cells; ignore them. Do not mention the "
+    "conversion, the grid, or the frame layout.\n"
     "</system_notice>"
 )
 
@@ -171,10 +173,13 @@ def _gif_frame_delays(raw: bytes) -> list[int] | None:
 
 
 def _build_animation_montage(path: str, max_size: int) -> tuple[str, bool] | None:
-    """Tile time-sampled animation frames into one preview image.
+    """Tile sampled animation frames into one preview image.
 
-    Frames are picked by playback time instead of frame index: slow, repetitive
-    stretches otherwise eat most of the slots while fast action gets skipped.
+    Adjacent GIF frames are usually near duplicates, so at most half of them are
+    sampled: the storyline stays intact while each cell keeps more pixels. The
+    grid grows with that sample count and stops at the grid capacity, and
+    sampled frames are picked by playback time instead of frame index so slow,
+    repetitive stretches do not eat most of the slots.
 
     Args:
         path: Local path of the source image.
@@ -187,43 +192,50 @@ def _build_animation_montage(path: str, max_size: int) -> tuple[str, bool] | Non
         total = getattr(image, "n_frames", 1)
         if total <= 1:
             return None
-        durations: list[int] | None = None
-        try:
-            durations = _gif_frame_delays(Path(path).read_bytes())
-        except OSError as exc:
-            logger.warning(f"[smart_fish] montage delay scan failed: {exc}")
-        if durations is None or len(durations) != total:
-            # Other animated formats still need Pillow, which decodes per frame.
-            durations = []
-            for position in range(total):
-                image.seek(position)
-                duration = int(image.info.get("duration") or 0)
-                # Viewers fall back to 100ms when a frame declares no duration.
-                durations.append(duration if duration > 0 else 100)
         image.seek(0)
         width, height = image.size
-        count = min(ANIMATION_MONTAGE_FRAMES, total)
-        total_ms = sum(durations)
-        frame_indices: list[int] = []
-        for step in range(count):
-            target = 0 if count == 1 else round(step * (total_ms - 1) / (count - 1))
-            elapsed = 0
-            chosen = total - 1
-            for position, duration in enumerate(durations):
-                if target < elapsed + duration:
-                    chosen = position
-                    break
-                elapsed += duration
-            frame_indices.append(chosen)
+        # Keep at least two frames so very short animations still show motion.
+        count = min(total, max(2, (total + 1) // 2), ANIMATION_MONTAGE_MAX_FRAMES)
+        cols = math.isqrt(count - 1) + 1
+        rows = (count + cols - 1) // cols
+        if count == total:
+            frame_indices = list(range(total))
+        else:
+            # Only skipped frames need playback times, so delays are read here
+            # to skip a full decode pass for the common case.
+            durations: list[int] | None = None
+            try:
+                durations = _gif_frame_delays(Path(path).read_bytes())
+            except OSError as exc:
+                logger.warning(f"[smart_fish] montage delay scan failed: {exc}")
+            if durations is None or len(durations) != total:
+                # Other animated formats still need Pillow, which decodes frames.
+                durations = []
+                for position in range(total):
+                    image.seek(position)
+                    duration = int(image.info.get("duration") or 0)
+                    # Viewers fall back to 100ms when a frame has no duration.
+                    durations.append(duration if duration > 0 else 100)
+            total_ms = sum(durations)
+            frame_indices = []
+            for step in range(count):
+                target = 0 if count == 1 else round(step * (total_ms - 1) / (count - 1))
+                elapsed = 0
+                chosen = total - 1
+                for position, duration in enumerate(durations):
+                    if target < elapsed + duration:
+                        chosen = position
+                        break
+                    elapsed += duration
+                frame_indices.append(chosen)
 
-        longest_edge = max(width, height) * ANIMATION_MONTAGE_GRID
-        scale = min(1.0, max(max_size, 1) / longest_edge)
+        # Each cell keeps at least max_size / max_grid on its longer side,
+        # and small source frames are never upscaled.
+        longest = max(width, height)
+        cell_long = min(longest, max(1, max_size // max(cols, rows)))
+        scale = cell_long / longest
         cell = (max(1, int(width * scale)), max(1, int(height * scale)))
-        canvas = PILImage.new(
-            "RGB",
-            (cell[0] * ANIMATION_MONTAGE_GRID, cell[1] * ANIMATION_MONTAGE_GRID),
-            (255, 255, 255),
-        )
+        canvas = PILImage.new("RGB", (cell[0] * cols, cell[1] * rows), (255, 255, 255))
         try:
             for out_index, frame_index in enumerate(frame_indices):
                 image.seek(frame_index)
@@ -235,8 +247,8 @@ def _build_animation_montage(path: str, max_size: int) -> tuple[str, bool] | Non
                         canvas.paste(
                             resized,
                             (
-                                (out_index % ANIMATION_MONTAGE_GRID) * cell[0],
-                                (out_index // ANIMATION_MONTAGE_GRID) * cell[1],
+                                (out_index % cols) * cell[0],
+                                (out_index // cols) * cell[1],
                             ),
                             resized,
                         )
@@ -252,7 +264,7 @@ def _build_animation_montage(path: str, max_size: int) -> tuple[str, bool] | Non
         finally:
             canvas.close()
     logger.info(
-        f"[smart_fish] animation montage frames={count}/{total} "
+        f"[smart_fish] animation montage frames={count}/{total} grid={cols}x{rows} "
         f"size={montage_size[0]}x{montage_size[1]}"
     )
     return str(output_path), True
@@ -1515,14 +1527,11 @@ class SmartReplyPlugin(Star):
                     master_names[position] if position < len(master_names) else "主人"
                 )
                 address_rule = (
-                    f"可以称呼对方为“{title}”，用熟悉、亲近、有感情的语气回应，"
-                    "不用对待陌生人的客套语气。"
+                    f"可以称呼对方为“{title}”，用熟悉、亲近的语气回应，"
                 )
             elif event.is_admin():
                 identity = "管理员"
-                address_rule = (
-                    f"对方不是你的主人，不称对方为“{banned_text}”"
-                )
+                address_rule = f"对方不是你的主人，不称对方为“{banned_text}”"
             else:
                 identity = "普通群友"
                 address_rule = f"对方不是你的主人，不称对方为“{banned_text}”"
