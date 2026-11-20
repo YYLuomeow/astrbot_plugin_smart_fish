@@ -350,7 +350,7 @@
           "quiet_hours": {
             "description": "免打扰时段",
             "type": "list",
-            "hint": "格式 HH:MM-HH:MM，可多条；支持跨零点，如 23:00-08:00",
+            "hint": "格式 HH:MM-HH:MM，可多条；支持跨零点，如 23:00-08:00。免打扰期间暂停计时，结束后继续累计",
             "default": [
               "23:00-09:00"
             ]
@@ -425,7 +425,7 @@
           "quiet_hours": {
             "description": "免打扰时段",
             "type": "list",
-            "hint": "格式 HH:MM-HH:MM，可多条；支持跨零点，如 23:00-08:00",
+            "hint": "格式 HH:MM-HH:MM，可多条；支持跨零点，如 23:00-08:00。免打扰期间暂停计时，结束后继续累计",
             "default": [
               "23:00-09:00"
             ]
@@ -470,7 +470,7 @@
       "enabled": {
         "description": "启用余额查询",
         "type": "bool",
-        "hint": "开启后机器人在被问及余额、剩余金额、最近花费或用量时，会调用 query_tokenrhythm_wallet 工具查询",
+        "hint": "开启后机器人在被问及余额、剩余金额、最近花费或用量时，会调用 query_wallet_and_token 工具查询，可指定查询天数数据，默认 7 天，示例：基元律动的钱包还剩多少，最近半个月吃了多少token",
         "default": true
       },
       "cookie": {
@@ -484,6 +484,25 @@
         "description": "仅管理员可查询",
         "type": "bool",
         "hint": "开启后只有管理员询问余额时机器人才会查询，其他人询问会被拒绝",
+        "default": true
+      }
+    }
+  },
+  "astrbot_usage": {
+    "description": "系统调用统计",
+    "type": "object",
+    "hint": "读取 AstrBot 自身的调用记录[数据与日志>统计]（Token、调用次数、今日用量、主要模型与会话、消息量），与基元律动余额查询是两套数据",
+    "items": {
+      "enabled": {
+        "description": "启用系统调用统计",
+        "type": "bool",
+        "hint": "开启后机器人在被问及系统 Token 用量、模型调用次数或消息量时，会调用 query_astrbot_usage 工具查询，可查询近期 N 天的用量数据，示例：系统近7天用了多少token，哪个群用的最多",
+        "default": true
+      },
+      "admin_only": {
+        "description": "仅管理员可查询",
+        "type": "bool",
+        "hint": "开启后只有管理员能查询系统调用统计，其他人询问会被拒绝",
         "default": true
       }
     }

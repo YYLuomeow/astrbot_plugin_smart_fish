@@ -1,4 +1,4 @@
-# 聪明的鱼（astrbot_plugin_smart_fish）
+# 聪明的鱼（astrbot\_plugin\_smart\_fish）
 
 面向 OneBot v11（aiocqhttp）的 AstrBot 群聊插件：先判断消息是不是在跟机器人说话，再决定是否回复。回复统一通过 `event.request_llm(...)` 交给 AstrBot 系统 LLM 链路生成，人格、模型、上下文都由 AstrBot 统一管理。
 
@@ -14,6 +14,7 @@
 - **戳一戳**：被戳后可反戳，并可选结合上下文回复。
 - **决策记录面板**：插件页面展示最近的判断记录，包括图片完整转述和机器人最终回复，最多保留 100 条。
 - **余额查询工具**：模型可通过 `query_wallet_and_token` 查询基元律动钱包余额和最近花费、Token、调用次数与主要模型。
+- **系统调用统计**：模型可通过 `query_astrbot_usage` 查询 AstrBot 自身记录的 Token 用量、调用次数、成功率、主要模型与会话、平台消息量，与基元律动余额查询是两套数据。
 
 ## 安装
 
@@ -77,6 +78,15 @@
 
 Cookie 获取方式：浏览器登录 [tokenrhythm.studio](https://tokenrhythm.studio)，打开开发者工具的 Network 面板，任选一个 `/api/` 请求，复制请求头中的完整 `Cookie` 值。Cookie 属于登录态，过期后需要重新复制。
 
+### 系统调用统计 `astrbot_usage`
+
+| 配置项          | 说明                              |
+| ------------ | ------------------------------- |
+| `enabled`    | 启用系统调用统计工具                      |
+| `admin_only` | 仅管理员可查询，其他人询问会被拒绝               |
+
+该功能读取 AstrBot 自身的统计数据库（`provider_stats` / `platform_stats`），与基元律动余额查询互不影响，可以单独开关。
+
 ## 余额查询工具
 
 工具名 `query_wallet_and_token`，由模型在用户询问余额、剩余金额、最近花费或用量时自主调用：
@@ -94,6 +104,26 @@ Cookie 获取方式：浏览器登录 [tokenrhythm.studio](https://tokenrhythm.s
 钱包余额 96.19 元。
 最近 7 天（2026-11-05 ~ 2026-11-11）花费 8.84 元，调用 1278 次，Token 1663.6 万（输入 1610.6 万 / 输出 52.9 万）。
 主要模型：DeepSeek V4.1 Flash 1017 6.25 元（71%）、Qwen3.8 Flash 2.59 元（29%）、GLM-5.3 Flash 0.01 元（0%）。
+```
+
+## 系统调用统计工具
+
+工具名 `query_astrbot_usage`，由模型在用户询问系统 Token 用量、模型调用次数或消息量时自主调用：
+
+- 参数 `days`（整数，默认 1，范围 1-30）：统计最近 N 天（含今天）。
+- 数据来源：AstrBot 数据库中的 `provider_stats`（仅 `agent_type=internal`）与 `platform_stats`。
+- 返回内容：区间总 Token（输入 / 缓存命中 / 输出）、调用次数、成功率、今日用量、Token 最多的三个模型与会话，以及同期的平台消息量。
+- 数据库不可用或版本过旧时返回明确的失败提示。
+
+示例输出：
+
+```text
+最近 30 天系统调用：Token 282.0 万，调用 215 次，成功率 100%。
+其中输入 77.7 万、缓存命中 202.6 万、输出 1.8 万。
+今日 Token 0，调用 0 次。
+主要模型：deepseek-v4.1-flash-1017 279.4 万、deepseek-v4.1-flash 2.6 万。
+主要会话：testbot:GroupMessage:1054044049 163.7 万、testbot:FriendMessage:1459970707 115.7 万。
+同期平台消息 591 条。
 ```
 
 ## 决策记录面板

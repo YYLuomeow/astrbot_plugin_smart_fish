@@ -2,6 +2,19 @@
 
 本文件记录 `astrbot_plugin_smart_fish`（聪明的鱼）的版本变更。
 
+## [1.2.7] - 2026-11-20
+
+### 新增
+
+- 新增系统调用统计工具 `query_astrbot_usage`：读取 AstrBot 自身的 `provider_stats` / `platform_stats`，返回区间总 Token（输入 / 缓存命中 / 输出）、调用次数、成功率、今日用量、Token 最多的模型与会话、平台消息量。
+- 新增 `astrbot_usage` 配置分组（`enabled`、`admin_only`），与基元律动余额查询 `wallet` 分开开关和鉴权。
+
+### 变更
+
+- 余额查询配置提示中的工具名同步为 `query_wallet_and_token`；README 补充系统调用统计的配置与示例。
+- 主动聊天计时改为“剩余时间”模型：免打扰时段内暂停计时，退出免打扰后从剩余时间继续累计，不再跳过整个间隔。
+- 主动聊天的剩余时间与连续未回复次数持久化到 `data/plugin_data/astrbot_plugin_smart_fish/proactive_state.json`，重载插件不再重新计时；会话被移出配置时同步清理。
+
 ## [1.2.6] - 2026-11-20
 
 ### 变更

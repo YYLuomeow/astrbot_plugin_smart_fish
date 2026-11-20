@@ -20,7 +20,7 @@ import math
 import re
 import time
 from collections import deque
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -300,7 +300,7 @@ class SmartReplyPlugin(Star):
             ["POST"],
             "Clear reply judgement records",
         )
-        self._proactive = ProactiveChatter(self)
+        self._proactive = ProactiveChatter(self, StarTools.get_data_dir(PLUGIN_NAME))
 
     async def initialize(self) -> None:
         """Start the proactive chat scheduler when the plugin is loaded."""
@@ -1312,12 +1312,148 @@ class SmartReplyPlugin(Star):
         )
         return texts
 
+    @filter.llm_tool(name="query_astrbot_usage")
+    async def query_astrbot_usage(self, event: AstrMessageEvent, days: int = 1) -> str:
+        """查询 AstrBot 系统自身的模型调用统计（Token 总量、调用次数、成功率、今日用量、主要模型与会话、平台消息量）。当用户询问机器人今天用了多少 Token、模型调用了多少次、系统整体用量或消息量时调用；这是 AstrBot 记录的运行数据，与基元律动钱包余额（query_wallet_and_token）是两套不同的数据。
+
+        Args:
+            days (int): 统计最近 N 天（含今天），默认 1 天，范围 1-30
+        """
+        usage_config = self.config.get("astrbot_usage") or {}
+        if not usage_config.get("enabled", True):
+            return "查询失败：系统调用统计功能已关闭。"
+        if usage_config.get("admin_only", True) and not event.is_admin():
+            return "查询失败：当前用户没有权限查询系统调用统计。"
+
+        try:
+            days = min(max(int(days), 1), 30)
+        except (TypeError, ValueError):
+            days = 1
+        # Imported lazily so an older core without these tables still loads.
+        try:
+            from sqlmodel import col, func, select
+
+            from astrbot.core.db.po import PlatformStat, ProviderStat
+        except ImportError:
+            return "查询失败：当前 AstrBot 版本不提供调用统计数据。"
+
+        local_tz = datetime.now().astimezone().tzinfo or timezone.utc
+        now_local = datetime.now(local_tz)
+        range_start_local = (now_local - timedelta(days=days)).replace(
+            minute=0, second=0, microsecond=0
+        )
+        today_start_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+        query_start_utc = range_start_local.astimezone(timezone.utc)
+
+        try:
+            async with self.context.get_db().get_db() as session:
+                result = await session.execute(
+                    select(ProviderStat)
+                    .where(
+                        ProviderStat.agent_type == "internal",
+                        ProviderStat.created_at >= query_start_utc,
+                    )
+                    .order_by(col(ProviderStat.created_at).asc())
+                )
+                records = result.scalars().all()
+                message_count = (
+                    await session.execute(
+                        select(func.coalesce(func.sum(PlatformStat.count), 0)).where(
+                            # Platform stats store naive local timestamps.
+                            PlatformStat.timestamp
+                            >= range_start_local.replace(tzinfo=None)
+                        )
+                    )
+                ).scalar_one()
+        except Exception as exc:  # noqa: BLE001 - stats are optional context
+            logger.warning(f"[smart_fish] astrbot usage query failed: {exc}")
+            return "查询失败：读取统计数据库出错，可能是当前版本不支持该统计。"
+
+        calls = 0
+        success = 0
+        tokens = 0
+        input_other = 0
+        input_cached = 0
+        output = 0
+        today_tokens = 0
+        today_calls = 0
+        by_model: dict[str, int] = {}
+        by_session: dict[str, int] = {}
+        for record in records:
+            created_at = record.created_at
+            # Stored timestamps are naive UTC, like the core dashboard reads them.
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=timezone.utc)
+            created_local = created_at.astimezone(local_tz)
+            if created_local < range_start_local:
+                continue
+            record_tokens = int(
+                record.token_input_other
+                + record.token_input_cached
+                + record.token_output
+            )
+            calls += 1
+            if record.status != "error":
+                success += 1
+            tokens += record_tokens
+            input_other += int(record.token_input_other)
+            input_cached += int(record.token_input_cached)
+            output += int(record.token_output)
+            model = record.provider_model or "未知模型"
+            by_model[model] = by_model.get(model, 0) + record_tokens
+            session_name = record.umo or "未知会话"
+            by_session[session_name] = by_session.get(session_name, 0) + record_tokens
+            if created_local >= today_start_local:
+                today_calls += 1
+                today_tokens += record_tokens
+
+        def readable(count: int) -> str:
+            return f"{count / 10000:.1f} 万" if count >= 10000 else str(count)
+
+        if calls:
+            rate = success / calls * 100
+            lines = [
+                f"最近 {days} 天系统调用：Token {readable(tokens)}，"
+                f"调用 {calls} 次，成功率 {rate:.0f}%。",
+                f"其中输入 {readable(input_other)}、缓存命中 {readable(input_cached)}、"
+                f"输出 {readable(output)}。",
+            ]
+        else:
+            lines = [f"最近 {days} 天没有记录到模型调用。"]
+        lines.append(f"今日 Token {readable(today_tokens)}，调用 {today_calls} 次。")
+
+        if by_model:
+            top_models = sorted(
+                by_model.items(), key=lambda item: item[1], reverse=True
+            )[:3]
+            lines.append(
+                "主要模型："
+                + "、".join(f"{name} {readable(value)}" for name, value in top_models)
+                + "。"
+            )
+        if by_session:
+            top_sessions = sorted(
+                by_session.items(), key=lambda item: item[1], reverse=True
+            )[:3]
+            lines.append(
+                "主要会话："
+                + "、".join(f"{name} {readable(value)}" for name, value in top_sessions)
+                + "。"
+            )
+        if message_count:
+            lines.append(f"同期平台消息 {int(message_count)} 条。")
+
+        logger.info(
+            f"[smart_fish] astrbot usage tool called by "
+            f"{event.get_sender_name()} days={days} calls={calls}"
+        )
+        return "\n".join(lines)
+
     @filter.llm_tool(name="query_wallet_and_token")
     async def query_wallet_and_token(
         self, event: AstrMessageEvent, days: int = 7
     ) -> str:
-        """查询钱包余额和最近用量（花费、Token、调用次数、主要模型）。当用户询问机器人钱包或者口袋还剩多少钱、余额、最近花了多少钱、吃了多少token或者花了多少token情况时调用。
-
+        """查询基元律动钱包余额和最近用量（花费、Token、调用次数、主要模型）。当用户询问机器人钱包或者口袋还剩多少钱、余额、最近花了多少钱、吃了多少token或者花了多少token情况时调用。
         Args:
             days (int): 用量统计天数，统计最近 N 天（含今天），默认 7 天，范围 1-90
         """
@@ -1526,9 +1662,7 @@ class SmartReplyPlugin(Star):
                 title = (
                     master_names[position] if position < len(master_names) else "主人"
                 )
-                address_rule = (
-                    f"可以称呼对方为“{title}”，用熟悉、亲近的语气回应，"
-                )
+                address_rule = f"可以称呼对方为“{title}”，用熟悉、亲近的语气回应，"
             elif event.is_admin():
                 identity = "管理员"
                 address_rule = f"对方不是你的主人，不称对方为“{banned_text}”"

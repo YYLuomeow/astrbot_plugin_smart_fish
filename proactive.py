@@ -9,10 +9,12 @@ reply judgement path.
 from __future__ import annotations
 
 import asyncio
+import json
 import random
 import time
 from datetime import datetime, timedelta
 from datetime import time as dt_time
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from astrbot.api import logger
@@ -26,6 +28,8 @@ if TYPE_CHECKING:
 
 # Scheduler tick; wake times themselves are randomized inside the configured range.
 CHECK_INTERVAL = 30
+# Remaining idle time is persisted so reloading the plugin does not restart it.
+PROACTIVE_STATE_FILE = "proactive_state.json"
 DEFAULT_PROMPT = (
     "<system_reminder>\n"
     "当前会话已经很久没有新消息了。参考下面的聊天记录，接上之前的话题，"
@@ -88,13 +92,67 @@ def format_history_lines(
 class ProactiveChatter:
     """Wake the main agent in idle sessions so the bot starts a conversation."""
 
-    def __init__(self, plugin: SmartReplyPlugin) -> None:
+    def __init__(self, plugin: SmartReplyPlugin, data_dir: Path) -> None:
         self.plugin = plugin
         self._task: asyncio.Task | None = None
-        # umo -> {"next_at": timestamp, "unanswered": consecutive proactive count}
-        self._sessions: dict[str, dict[str, Any]] = {}
+        self._state_path = data_dir / PROACTIVE_STATE_FILE
+        # umo -> {"remaining": seconds left before the next proactive turn,
+        #         "unanswered": consecutive proactive count,
+        #         "last_tick": timestamp of the last time accounting}
+        self._sessions: dict[str, dict[str, Any]] = self._load_sessions()
+        self._last_save = 0.0
         # Invalid UMO strings already reported, to avoid logging them every tick.
         self._invalid: set[str] = set()
+
+    def _load_sessions(self) -> dict[str, dict[str, Any]]:
+        """Restore paused timers so a plugin reload keeps the elapsed wait.
+
+        Returns:
+            Session states keyed by UMO, with the saved remaining time; empty
+            when nothing was saved or the file cannot be read.
+        """
+        try:
+            raw = json.loads(self._state_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        sessions = raw.get("sessions") if isinstance(raw, dict) else None
+        if not isinstance(sessions, dict):
+            return {}
+        now = time.time()
+        restored: dict[str, dict[str, Any]] = {}
+        for umo, item in sessions.items():
+            if not isinstance(umo, str) or not isinstance(item, dict):
+                continue
+            try:
+                remaining = max(float(item.get("remaining", 0.0)), 0.0)
+                unanswered = max(int(item.get("unanswered", 0)), 0)
+            except (TypeError, ValueError):
+                continue
+            restored[umo] = {
+                "remaining": remaining,
+                "unanswered": unanswered,
+                "last_tick": now,
+            }
+        return restored
+
+    def _save_sessions(self) -> None:
+        """Persist remaining timers; a write failure must not stop the scheduler."""
+        payload = {
+            "sessions": {
+                umo: {
+                    "remaining": round(max(state["remaining"], 0.0), 1),
+                    "unanswered": state["unanswered"],
+                }
+                for umo, state in self._sessions.items()
+            }
+        }
+        try:
+            self._state_path.write_text(
+                json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+            )
+        except OSError as exc:
+            logger.warning(f"[smart_fish] proactive state save failed: {exc}")
+        self._last_save = time.time()
 
     def start(self) -> None:
         """Start the scheduler task when proactive chat may be enabled."""
@@ -103,6 +161,7 @@ class ProactiveChatter:
 
     async def stop(self) -> None:
         """Cancel the scheduler task on plugin unload."""
+        self._save_sessions()
         task = self._task
         self._task = None
         if task is None:
@@ -124,7 +183,11 @@ class ProactiveChatter:
             # The scheduler creates the timer when it first sees this session.
             return
         state["unanswered"] = 0
-        state["next_at"] = time.time() + self._next_delay(self._section_for(umo))
+        state["remaining"] = self._next_delay(self._section_for(umo))
+        state["last_tick"] = time.time()
+        # Busy groups update this on every message, so throttle disk writes.
+        if time.time() - self._last_save >= 5:
+            self._save_sessions()
 
     async def _run(self) -> None:
         """Check timers periodically; individual failures must not stop it."""
@@ -138,7 +201,11 @@ class ProactiveChatter:
             await asyncio.sleep(CHECK_INTERVAL)
 
     async def _tick(self) -> None:
-        """Send a proactive message for every session whose timer elapsed."""
+        """Account idle time and send a proactive message when it runs out.
+
+        Only time outside quiet hours is counted, so a quiet window pauses the
+        idle timer instead of postponing it by a whole interval.
+        """
         now = time.time()
         configured = self._configured_sessions()
         # Forget sessions removed from the configuration, otherwise re-adding
@@ -147,20 +214,19 @@ class ProactiveChatter:
         for umo in [umo for umo in self._sessions if umo not in active]:
             del self._sessions[umo]
         for umo, section in configured:
-            state = self._session_state(umo)
-            if state["next_at"] <= 0:
-                state["next_at"] = now + self._next_delay(section)
+            state = self._session_state(umo, section)
+            elapsed = max(now - state["last_tick"], 0.0)
+            state["last_tick"] = now
+            if self._quiet_end(datetime.now(), section):
                 continue
-            if now < state["next_at"]:
-                continue
-            quiet_until = self._quiet_end(datetime.now(), section)
-            if quiet_until:
-                state["next_at"] = quiet_until + self._next_delay(section)
+            state["remaining"] -= elapsed
+            if state["remaining"] > 0:
                 continue
             if state["unanswered"] >= self._max_unanswered(section):
                 # Wait for someone to speak before trying again.
                 continue
             await self._send(umo, state, section)
+        self._save_sessions()
 
     async def _send(
         self, umo: str, state: dict[str, Any], section: dict[str, Any]
@@ -186,7 +252,9 @@ class ProactiveChatter:
                 f"[smart_fish] proactive message queued for {umo} "
                 f"(unanswered={state['unanswered']})"
             )
-        state["next_at"] = time.time() + self._next_delay(section)
+        state["remaining"] = self._next_delay(section)
+        state["last_tick"] = time.time()
+        self._save_sessions()
 
     async def _wake(self, umo: str, prompt: str) -> None:
         """Submit the prompt so the main agent answers it as a normal reply.
@@ -283,8 +351,25 @@ class ProactiveChatter:
         )
         return self._config().get(key) or {}
 
-    def _session_state(self, umo: str) -> dict[str, Any]:
-        return self._sessions.setdefault(umo, {"next_at": 0.0, "unanswered": 0})
+    def _session_state(self, umo: str, section: dict[str, Any]) -> dict[str, Any]:
+        """Return the timer state of a session, creating a fresh one if needed.
+
+        Args:
+            umo: Target session.
+            section: Group or private settings that define the interval.
+
+        Returns:
+            Mutable scheduler state of the session.
+        """
+        state = self._sessions.get(umo)
+        if state is None:
+            state = {
+                "remaining": self._next_delay(section),
+                "unanswered": 0,
+                "last_tick": time.time(),
+            }
+            self._sessions[umo] = state
+        return state
 
     def _configured_sessions(self) -> list[tuple[str, dict[str, Any]]]:
         """Return ``(umo, settings)`` pairs enabled by the type sections."""
