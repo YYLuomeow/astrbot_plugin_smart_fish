@@ -2,6 +2,12 @@
 
 本文件记录 `astrbot_plugin_smart_fish`（聪明的鱼）的版本变更。
 
+## [1.2.8] - 2026-11-20
+
+### 修复
+
+- 修复同时安装 `astrbot_plugin_qq_enhance`（戳一戳响应为 `respond`）时戳一戳不回复的问题：该插件会把戳一戳再包装成一条合成通知事件送进回复链路，与本插件的 `_handle_poke` 同时生成回复，双方互相打断（日志中的 `Agent execution was requested to stop by user.`），最终两边的回复都被丢弃。现在本插件跳过这条合成事件，只由 `_handle_poke` 回复一次。
+
 ## [1.2.7] - 2026-11-20
 
 ### 新增

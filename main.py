@@ -483,6 +483,18 @@ class SmartReplyPlugin(Star):
             getattr(event, "event_kind", "message") != "message"
         ):
             return
+        # qq_enhance republishes platform notices as synthetic reply events. A
+        # poke notice is answered by _handle_poke itself, so replying to the
+        # copy as well makes both generations abort each other and neither is
+        # ever sent.
+        poke_config = self.config.get("poke") or {}
+        if (
+            poke_config.get("reply", True)
+            and getattr(event, "notice_response", False)
+            and getattr(event, "platform_event_type", None) == "notify/poke"
+        ):
+            event.should_call_llm(True)
+            return
         if event.get_extra("handlers_parsed_params"):
             return
         # Some platforms report the bot's own outgoing messages. They are not
