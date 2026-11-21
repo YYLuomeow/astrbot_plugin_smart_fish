@@ -122,7 +122,7 @@ Cookie 获取方式：浏览器登录 [tokenrhythm.studio](https://tokenrhythm.s
 其中输入 77.7 万、缓存命中 202.6 万、输出 1.8 万。
 今日 Token 0，调用 0 次。
 主要模型：deepseek-v4.1-flash-1017 279.4 万、deepseek-v4.1-flash 2.6 万。
-主要会话：testbot:GroupMessage:1054044049 163.7 万、testbot:FriendMessage:1459970707 115.7 万。
+主要会话：testbot:GroupMessage:123456789 163.7 万、testbot:FriendMessage:123456789 115.7 万。
 同期平台消息 591 条。
 ```
 
