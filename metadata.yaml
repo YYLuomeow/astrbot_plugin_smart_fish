@@ -2,7 +2,7 @@ name: astrbot_plugin_smart_fish
 display_name: 聪明的鱼
 desc: 基于唤醒词、主人与判断模型的按需回复，支持回复防抖、群聊上下文、认主、图片与动图转述、转述缓存、戳一戳反戳、群聊与私聊主动聊天、决策记录面板，并可查询基元律动(tokenrhythm.studio)余额用量与 AstrBot 系统调用统计。【有建议或bug在 GitHub 上提交，看到后会尽快修复，预计一两天，欢迎参与贡献】
 short_desc: 让小鲸鱼只在被叫到时说话，还能查余额
-version: 1.2.8
+version: 1.2.9
 author: 罗喵
 support_platforms:
   - aiocqhttp

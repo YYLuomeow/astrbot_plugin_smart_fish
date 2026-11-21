@@ -842,6 +842,15 @@ class SmartReplyPlugin(Star):
             # A newer message arrived while judging; it will merge and answer.
             return
 
+        if ocr_text:
+            # Publish the converted description in the event text so plugins
+            # that read ``message_str`` (memory recall, meme selection, notice
+            # handlers) see the real content. Image components are left as is,
+            # so consumers that need the original file keep working.
+            event.message_str = "\n".join(
+                part for part in (event.message_str.strip(), ocr_text) if part
+            )
+
         state["active_sender"] = sender
         event.set_extra("_smart_fish", True)
         event.set_extra("_smart_fish_context", prior)
